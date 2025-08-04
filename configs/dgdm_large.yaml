@@ -1,0 +1,84 @@
+# DGDM Large Configuration
+# Large-scale configuration for high-performance DGDM training
+
+experiment:
+  name: "dgdm_large_experiment"
+  seed: 42
+  debug: false
+
+model:
+  node_features: 1024
+  hidden_dims: [768, 512, 256, 128]
+  num_diffusion_steps: 20
+  attention_heads: 16
+  dropout: 0.15
+  graph_layers: 6
+  use_spatial_attention: true
+  use_hierarchical: true
+  diffusion_schedule: "cosine"
+  activation: "gelu"
+  normalization: "layer"
+  pooling: "attention"
+  num_classes: null
+  regression_targets: 0
+
+data:
+  dataset_type: "slide"
+  batch_size: 2  # Smaller batch size for large model
+  num_workers: 12
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  augmentations: "strong"
+  max_slides_per_split: null
+  cache_graphs: true
+  shuffle_train: true
+  
+  # Enhanced slide processing
+  patch_size: 512
+  magnifications: [5.0, 20.0, 40.0]
+  tissue_threshold: 0.8
+  max_patches: 2000
+  feature_extractor: "dinov2"
+
+training:
+  max_epochs: 200
+  learning_rate: 5e-5  # Lower learning rate for large model
+  weight_decay: 1e-4
+  pretrain_epochs: 100
+  finetune_epochs: 100
+  masking_ratio: 0.2
+  diffusion_noise_schedule: "cosine"
+  use_contrastive_loss: true
+  contrastive_temperature: 0.07
+  scheduler_type: "cosine"
+  warmup_steps: 2000
+
+hardware:
+  gpus: 4  # Multi-GPU training
+  precision: "16-mixed"
+
+logging:
+  logger_type: "wandb"
+  log_level: "INFO"
+  save_top_k: 5
+  monitor_metric: "val_loss"
+
+classification:
+  enabled: false
+  num_classes: 5
+  class_weights: null
+  label_smoothing: 0.1
+
+regression:
+  enabled: false
+  num_targets: 3
+  loss_type: "mse"
+  predict_uncertainty: true
+
+advanced:
+  gradient_clip_val: 0.5
+  accumulate_grad_batches: 4  # Effective batch size = 2 * 4 = 8
+  check_val_every_n_epoch: 2
+  enable_progress_bar: true
+  enable_model_summary: true

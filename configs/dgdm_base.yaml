@@ -1,0 +1,86 @@
+# DGDM Base Configuration
+# Configuration for training Dynamic Graph Diffusion Models on histopathology data
+
+experiment:
+  name: "dgdm_base_experiment"
+  seed: 42
+  debug: false
+
+model:
+  node_features: 768
+  hidden_dims: [512, 256, 128]
+  num_diffusion_steps: 10
+  attention_heads: 8
+  dropout: 0.1
+  graph_layers: 4
+  use_spatial_attention: true
+  use_hierarchical: true
+  diffusion_schedule: "cosine"
+  activation: "gelu"
+  normalization: "layer"
+  pooling: "attention"
+  num_classes: null  # Set for classification tasks
+  regression_targets: 0  # Set for regression tasks
+
+data:
+  dataset_type: "slide"  # Options: slide, graph, patch
+  batch_size: 4
+  num_workers: 8
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  augmentations: "light"  # Options: none, light, strong
+  max_slides_per_split: null
+  cache_graphs: true
+  shuffle_train: true
+  
+  # Slide processing parameters
+  patch_size: 256
+  magnifications: [20.0]
+  tissue_threshold: 0.8
+  max_patches: 1000
+  feature_extractor: "dinov2"  # Options: dinov2, ctp, hipt
+
+training:
+  max_epochs: 100
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  pretrain_epochs: 50
+  finetune_epochs: 50
+  masking_ratio: 0.15
+  diffusion_noise_schedule: "cosine"
+  use_contrastive_loss: true
+  contrastive_temperature: 0.1
+  scheduler_type: "cosine"  # Options: cosine, onecycle, none
+  warmup_steps: 1000
+
+hardware:
+  gpus: 1
+  precision: "16-mixed"  # Options: 32, 16-mixed, bf16-mixed
+
+logging:
+  logger_type: "tensorboard"  # Options: tensorboard, wandb
+  log_level: "INFO"
+  save_top_k: 3
+  monitor_metric: "val_loss"
+  
+# Task-specific configurations
+classification:
+  enabled: false
+  num_classes: 2
+  class_weights: null
+  label_smoothing: 0.0
+
+regression:
+  enabled: false
+  num_targets: 1
+  loss_type: "mse"  # Options: mse, mae, huber
+  predict_uncertainty: false
+
+# Advanced options
+advanced:
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 1
+  enable_progress_bar: true
+  enable_model_summary: true
