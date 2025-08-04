@@ -300,7 +300,7 @@ cd docs && make html
 ```bibtex
 @inproceedings{dgdm_histopath,
   title={Dynamic Graph Diffusion Models for Whole-Slide Histopathology Analysis},
-  author={Your Name et al.},
+  author={Daniel Schmidt},
   booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
   year={2025}
 }
