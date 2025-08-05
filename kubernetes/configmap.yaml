@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dgdm-config
+  namespace: dgdm-histopath
+  labels:
+    app.kubernetes.io/name: dgdm-histopath
+    app.kubernetes.io/component: config
+data:
+  # Application configuration
+  DGDM_LOG_LEVEL: "INFO"
+  DGDM_DATA_DIR: "/app/data"
+  DGDM_OUTPUT_DIR: "/app/outputs"
+  DGDM_CACHE_DIR: "/app/cache"
+  DGDM_MODEL_DIR: "/app/models"
+  
+  # Performance settings
+  DGDM_MAX_WORKERS: "4"
+  DGDM_BATCH_SIZE: "8"
+  DGDM_PREFETCH_FACTOR: "4"
+  DGDM_PIN_MEMORY: "true"
+  
+  # Cache settings
+  DGDM_CACHE_SIZE_GB: "10"
+  DGDM_CACHE_TTL_HOURS: "24"
+  
+  # Monitoring
+  DGDM_METRICS_ENABLED: "true"
+  DGDM_METRICS_PORT: "9090"
+  DGDM_HEALTH_CHECK_PORT: "8080"
+  
+  # Security
+  DGDM_ENABLE_AUTH: "true"
+  DGDM_RATE_LIMIT_REQUESTS: "100"
+  DGDM_RATE_LIMIT_WINDOW: "3600"
+  
+  # Training configuration
+  training-config.yaml: |
+    model:
+      node_features: 768
+      hidden_dims: [512, 256, 128]
+      num_diffusion_steps: 10
+      attention_heads: 8
+      dropout: 0.1
+      
+    training:
+      batch_size: 4
+      learning_rate: 0.0001
+      weight_decay: 0.00001
+      max_epochs: 100
+      pretrain_epochs: 50
+      finetune_epochs: 50
+      
+    data:
+      augmentations: "light"
+      num_workers: 8
+      prefetch_factor: 4
+      
+    hardware:
+      gpus: 1
+      precision: "16-mixed"
+      
+    logging:
+      logger_type: "tensorboard"
+      save_top_k: 3
+      monitor_metric: "val_loss"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: dgdm-histopath
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    
+    http {
+        upstream dgdm-app {
+            server dgdm-app-service:8000;
+        }
+        
+        upstream grafana {
+            server grafana-service:3000;
+        }
+        
+        server {
+            listen 80;
+            server_name _;
+            
+            # Health check endpoint
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+            
+            # Main application
+            location / {
+                proxy_pass http://dgdm-app;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_connect_timeout 60s;
+                proxy_send_timeout 60s;
+                proxy_read_timeout 60s;
+            }
+            
+            # Monitoring dashboard
+            location /monitoring/ {
+                proxy_pass http://grafana/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            
+            # Static files
+            location /static/ {
+                root /var/www;
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+            }
+        }
+    }

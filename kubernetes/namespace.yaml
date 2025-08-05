@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dgdm-histopath
+  labels:
+    name: dgdm-histopath
+    app.kubernetes.io/name: dgdm-histopath
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    description: "DGDM Histopath Lab - Dynamic Graph Diffusion Models for Histopathology"

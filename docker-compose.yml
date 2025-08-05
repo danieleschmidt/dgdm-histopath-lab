@@ -1,0 +1,317 @@
+# Docker Compose for DGDM Histopath Lab
+version: '3.8'
+
+services:
+  # Main application service
+  dgdm-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: dgdm-histopath:latest
+    container_name: dgdm-app
+    restart: unless-stopped
+    environment:
+      - DGDM_LOG_LEVEL=INFO
+      - DGDM_DATA_DIR=/app/data
+      - DGDM_OUTPUT_DIR=/app/outputs
+      - DGDM_CACHE_DIR=/app/cache
+      - DGDM_DATABASE_URL=postgresql://dgdm:dgdm_password@postgres:5432/dgdm_db
+      - DGDM_REDIS_URL=redis://redis:6379/0
+      - DGDM_SECRET_KEY=${DGDM_SECRET_KEY:-your-secret-key-here}
+    volumes:
+      - ./data:/app/data:ro
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+      - ./configs:/app/configs:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 8G
+          cpus: '4.0'
+    healthcheck:
+      test: ["CMD", "python", "/usr/local/bin/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Training worker service
+  dgdm-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: dgdm-histopath:latest
+    container_name: dgdm-worker
+    restart: unless-stopped
+    environment:
+      - DGDM_LOG_LEVEL=INFO
+      - DGDM_WORKER_MODE=true
+      - DGDM_DATABASE_URL=postgresql://dgdm:dgdm_password@postgres:5432/dgdm_db
+      - DGDM_REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data:ro
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+      - ./configs:/app/configs:ro
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 16G
+          cpus: '8.0'
+    command: ["python", "-m", "dgdm_histopath.workers.training_worker"]
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    container_name: dgdm-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=dgdm_db
+      - POSTGRES_USER=dgdm
+      - POSTGRES_PASSWORD=dgdm_password
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dgdm -d dgdm_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis cache and message broker
+  redis:
+    image: redis:7-alpine
+    container_name: dgdm-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dgdm-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dgdm-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin123}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+
+  # Elasticsearch for log aggregation
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    container_name: dgdm-elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - xpack.security.enabled=false
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+
+  # Kibana for log visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.8.0
+    container_name: dgdm-kibana
+    restart: unless-stopped
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+
+  # File browser for data management
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: dgdm-filebrowser
+    restart: unless-stopped
+    volumes:
+      - ./data:/srv/data:ro
+      - ./outputs:/srv/outputs
+      - ./logs:/srv/logs:ro
+    ports:
+      - "8080:80"
+    environment:
+      - FB_DATABASE=/srv/database.db
+      - FB_ROOT=/srv
+    networks:
+      - dgdm-network
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: dgdm-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - dgdm-app
+      - grafana
+      - kibana
+    networks:
+      - dgdm-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+
+  # Development service (only for development)
+  dgdm-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    image: dgdm-histopath:dev
+    container_name: dgdm-dev
+    volumes:
+      - .:/app
+      - jupyter_data:/home/dgdm/.jupyter
+    ports:
+      - "8888:8888"
+      - "6006:6006"  # TensorBoard
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+    networks:
+      - dgdm-network
+    profiles:
+      - development
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  jupyter_data:
+    driver: local
+
+networks:
+  dgdm-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
