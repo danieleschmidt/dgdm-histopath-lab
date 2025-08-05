@@ -6,19 +6,30 @@ Command-line interface for training DGDM models on histopathology data.
 
 import typer
 import logging
+import sys
+import traceback
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
+import signal
+from datetime import datetime
 
-from dgdm_histopath.models.dgdm_model import DGDMModel
+from dgdm_histopath.models.dgdm_model import DGDMModel, ModelConfigurationError
 from dgdm_histopath.data.datamodule import HistopathDataModule
 from dgdm_histopath.training.trainer import DGDMTrainer
-from dgdm_histopath.utils.config import load_config, save_config
+from dgdm_histopath.utils.config import load_config, save_config, ConfigurationError
+from dgdm_histopath.utils.validation import InputValidator, ValidationError, validate_gpu_availability
+from dgdm_histopath.utils.logging import setup_logging, get_logger, log_system_info
+from dgdm_histopath.utils.monitoring import start_background_monitoring, health_checker, monitor_operation
+from dgdm_histopath.utils.security import rate_limiter, security_auditor
+
+# Setup warning filters
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 app = typer.Typer(help="Train DGDM models on histopathology data")
@@ -71,36 +82,193 @@ def train(
     fast_dev_run: bool = typer.Option(False, help="Run single batch for debugging"),
     debug: bool = typer.Option(False, help="Enable debug logging")
 ):
-    """Train DGDM model on histopathology data."""
+    """Train DGDM model on histopathology data with comprehensive error handling."""
     
-    # Setup logging
-    log_level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
+    # Global error handling setup
+    def signal_handler(signum, frame):
+        logger.error(f"Received signal {signum}. Cleaning up and exiting...")
+        sys.exit(1)
     
-    # Set random seed
-    pl.seed_everything(seed)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    # Create output directory
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    
-    logger.info(f"Starting DGDM training experiment: {experiment_name}")
-    logger.info(f"Output directory: {output_path}")
-    
-    # Parse hidden dimensions
-    hidden_dims_list = [int(x.strip()) for x in hidden_dims.split(",")]
-    
-    # Load configuration if provided
-    if config:
-        config_dict = load_config(config)
-        logger.info(f"Loaded configuration from {config}")
-    else:
-        config_dict = {}
+    try:
+        # Setup enhanced logging
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
         
-    # Create data module
-    logger.info("Setting up data module...")
-    data_module = HistopathDataModule(
+        log_file = output_path / "training.log"
+        setup_logging(
+            level="DEBUG" if debug else "INFO",
+            log_file=str(log_file),
+            enable_security_audit=True,
+            structured_logging=False
+        )
+        logger = get_logger(__name__)
+        
+        # Log system information
+        log_system_info()
+        
+        # Start background monitoring
+        start_background_monitoring(interval_seconds=60)
+        
+        # Validate and sanitize inputs
+        with monitor_operation("input_validation"):
+            _validate_training_inputs(
+                data_dir, config, output_dir, node_features, hidden_dims,
+                num_diffusion_steps, attention_heads, dropout, max_epochs,
+                batch_size, learning_rate, weight_decay, dataset_type,
+                augmentations, num_workers, pretrain_epochs, finetune_epochs,
+                masking_ratio, gpus, precision, logger_type, experiment_name,
+                save_top_k, monitor_metric, seed
+            )
+        
+        # Security audit
+        security_auditor.log_security_event(
+            'training_started',
+            {
+                'experiment_name': experiment_name,
+                'data_dir': data_dir,
+                'output_dir': output_dir,
+                'gpus': gpus
+            }
+        )
+        
+        # Set random seed with validation
+        seed = InputValidator.validate_integer(seed, min_val=0, max_val=2**32-1)
+        pl.seed_everything(seed)
+        
+        logger.info(f"Starting DGDM training experiment: {experiment_name}")
+        logger.info(f"Output directory: {output_path}")
+        
+        # Parse and validate hidden dimensions
+        try:
+            hidden_dims_list = [int(x.strip()) for x in hidden_dims.split(",")]
+            for dim in hidden_dims_list:
+                InputValidator.validate_integer(dim, min_val=1, max_val=10000)
+        except Exception as e:
+            raise ValidationError(f"Invalid hidden_dims format: {e}")
+            
+        # Load and validate configuration
+        config_dict = {}
+        if config:
+            try:
+                config_path = InputValidator.validate_file_path(config)
+                config_dict = load_config(
+                    config_path,
+                    validate=True,
+                    required_fields=None
+                )
+                logger.info(f"Loaded configuration from {config_path}")
+            except Exception as e:
+                logger.error(f"Failed to load configuration: {e}")
+                raise ConfigurationError(f"Configuration loading failed: {e}")
+                
+        # Continue with training setup...
+        return _execute_training(
+            data_dir, output_path, hidden_dims_list, config_dict,
+            node_features, num_diffusion_steps, attention_heads, dropout,
+            batch_size, learning_rate, weight_decay, max_epochs,
+            dataset_type, augmentations, num_workers, pretrain_epochs,
+            finetune_epochs, masking_ratio, gpus, precision, logger_type,
+            experiment_name, save_top_k, monitor_metric, resume_from_checkpoint,
+            fast_dev_run, logger
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user")
+        return 1
+    except ValidationError as e:
+        logger.error(f"Validation error: {e}")
+        typer.echo(f"❌ Validation error: {e}", err=True)
+        return 1
+    except ConfigurationError as e:
+        logger.error(f"Configuration error: {e}")
+        typer.echo(f"❌ Configuration error: {e}", err=True)
+        return 1
+    except ModelConfigurationError as e:
+        logger.error(f"Model configuration error: {e}")
+        typer.echo(f"❌ Model configuration error: {e}", err=True)
+        return 1
+    except Exception as e:
+        logger.error(f"Unexpected error during training: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        typer.echo(f"❌ Training failed: {e}", err=True)
+        return 1
+
+
+def _validate_training_inputs(*args):
+    """Validate all training input parameters."""
+    (data_dir, config, output_dir, node_features, hidden_dims,
+     num_diffusion_steps, attention_heads, dropout, max_epochs,
+     batch_size, learning_rate, weight_decay, dataset_type,
+     augmentations, num_workers, pretrain_epochs, finetune_epochs,
+     masking_ratio, gpus, precision, logger_type, experiment_name,
+     save_top_k, monitor_metric, seed) = args
+    
+    # Validate directories
+    InputValidator.validate_directory_path(data_dir)
+    InputValidator.validate_directory_path(output_dir, create_if_missing=True)
+    
+    # Validate model parameters
+    InputValidator.validate_integer(node_features, min_val=1, max_val=10000)
+    InputValidator.validate_integer(num_diffusion_steps, min_val=1, max_val=1000)
+    InputValidator.validate_integer(attention_heads, min_val=1, max_val=32)
+    InputValidator.validate_numeric(dropout, min_val=0.0, max_val=0.9)
+    
+    # Validate training parameters
+    InputValidator.validate_integer(max_epochs, min_val=1, max_val=10000)
+    InputValidator.validate_integer(batch_size, min_val=1, max_val=1024)
+    InputValidator.validate_numeric(learning_rate, min_val=1e-6, max_val=1.0)
+    InputValidator.validate_numeric(weight_decay, min_val=0.0, max_val=1.0)
+    
+    # Validate data parameters
+    InputValidator.validate_enum(dataset_type, ["slide", "graph", "patch"])
+    InputValidator.validate_enum(augmentations, ["none", "light", "medium", "strong"])
+    InputValidator.validate_integer(num_workers, min_val=0, max_val=64)
+    
+    # Validate training strategy
+    InputValidator.validate_integer(pretrain_epochs, min_val=0, max_val=10000)
+    InputValidator.validate_integer(finetune_epochs, min_val=0, max_val=10000)
+    InputValidator.validate_numeric(masking_ratio, min_val=0.0, max_val=0.9)
+    
+    # Validate hardware
+    InputValidator.validate_integer(gpus, min_val=0, max_val=8)
+    InputValidator.validate_enum(precision, ["16-mixed", "32", "64", "bf16-mixed"])
+    
+    # Validate logging
+    InputValidator.validate_enum(logger_type, ["tensorboard", "wandb", "csv"])
+    InputValidator.sanitize_string(experiment_name, max_length=100)
+    
+    # Validate checkpointing
+    InputValidator.validate_integer(save_top_k, min_val=1, max_val=20)
+    InputValidator.validate_enum(monitor_metric, ["val_loss", "val_acc", "train_loss"])
+    
+    # GPU availability check
+    if gpus > 0:
+        gpu_info = validate_gpu_availability()
+        if not gpu_info['available']:
+            raise ValidationError("GPUs requested but CUDA not available")
+        if gpus > gpu_info['device_count']:
+            raise ValidationError(f"Requested {gpus} GPUs but only {gpu_info['device_count']} available")
+
+
+def _execute_training(
+    data_dir, output_path, hidden_dims_list, config_dict,
+    node_features, num_diffusion_steps, attention_heads, dropout,
+    batch_size, learning_rate, weight_decay, max_epochs,
+    dataset_type, augmentations, num_workers, pretrain_epochs,
+    finetune_epochs, masking_ratio, gpus, precision, logger_type,
+    experiment_name, save_top_k, monitor_metric, resume_from_checkpoint,
+    fast_dev_run, logger
+):
+    """Execute the training process with monitoring."""
+    
+    with monitor_operation("training_execution"):
+        # Create data module
+        logger.info("Setting up data module...")
+        try:
+            data_module = HistopathDataModule(
         data_dir=data_dir,
         dataset_type=dataset_type,
         batch_size=batch_size,

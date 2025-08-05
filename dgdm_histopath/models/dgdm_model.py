@@ -9,14 +9,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data, Batch
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 import logging
+import warnings
+from contextlib import contextmanager
 
 from dgdm_histopath.core.diffusion import DiffusionLayer
 from dgdm_histopath.core.graph_layers import DynamicGraphLayer, GraphUNet
 from dgdm_histopath.core.attention import MultiHeadAttention, SpatialAttention
 from dgdm_histopath.models.encoders import FeatureEncoder, GraphEncoder
 from dgdm_histopath.models.decoders import ClassificationHead, RegressionHead
+from dgdm_histopath.utils.validation import InputValidator, ValidationError
+from dgdm_histopath.utils.monitoring import monitor_operation
+from dgdm_histopath.utils.logging import get_logger
+
+
+class ModelConfigurationError(Exception):
+    """Exception raised for model configuration errors."""
+    pass
+
+
+class ModelInferenceError(Exception):
+    """Exception raised during model inference."""
+    pass
 
 
 class DGDMModel(nn.Module):
@@ -65,6 +80,20 @@ class DGDMModel(nn.Module):
         """
         super().__init__()
         
+        self.logger = get_logger(__name__)
+        
+        # Comprehensive input validation
+        try:
+            self._validate_configuration(
+                node_features, hidden_dims, num_diffusion_steps, attention_heads,
+                dropout, graph_layers, diffusion_schedule, activation, 
+                normalization, pooling, num_classes, regression_targets
+            )
+        except Exception as e:
+            self.logger.error(f"Model configuration validation failed: {e}")
+            raise ModelConfigurationError(f"Invalid model configuration: {e}")
+        
+        # Store validated parameters
         self.node_features = node_features
         self.hidden_dims = hidden_dims
         self.num_diffusion_steps = num_diffusion_steps
@@ -76,7 +105,7 @@ class DGDMModel(nn.Module):
         self.num_classes = num_classes
         self.regression_targets = regression_targets
         
-        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"Initializing DGDM model with {sum(p.numel() for p in self.parameters() if p.requires_grad)} parameters")
         
         # Input feature encoder
         self.feature_encoder = FeatureEncoder(
@@ -154,9 +183,64 @@ class DGDMModel(nn.Module):
                 activation=activation
             )
             
-        # Initialize parameters
-        self.apply(self._init_weights)
+        # Initialize parameters with monitoring
+        with monitor_operation("model_parameter_initialization"):
+            self.apply(self._init_weights)
+            
+        self.logger.info("DGDM model initialization completed successfully")
+    
+    def _validate_configuration(
+        self, node_features: int, hidden_dims: List[int], num_diffusion_steps: int,
+        attention_heads: int, dropout: float, graph_layers: int, 
+        diffusion_schedule: str, activation: str, normalization: str,
+        pooling: str, num_classes: Optional[int], regression_targets: int
+    ):
+        """Validate model configuration parameters."""
         
+        # Validate node features
+        InputValidator.validate_integer(node_features, min_val=1, max_val=10000)
+        
+        # Validate hidden dimensions
+        if not isinstance(hidden_dims, list) or len(hidden_dims) == 0:
+            raise ValidationError("hidden_dims must be a non-empty list")
+        
+        for i, dim in enumerate(hidden_dims):
+            InputValidator.validate_integer(dim, min_val=1, max_val=10000)
+            
+        # Ensure dimensions are decreasing or stable
+        for i in range(1, len(hidden_dims)):
+            if hidden_dims[i] > hidden_dims[i-1]:
+                warnings.warn(f"Hidden dimension {i} ({hidden_dims[i]}) > previous ({hidden_dims[i-1]})")
+        
+        # Validate diffusion parameters
+        InputValidator.validate_integer(num_diffusion_steps, min_val=1, max_val=1000)
+        InputValidator.validate_enum(diffusion_schedule, ["linear", "cosine", "sigmoid"])
+        
+        # Validate attention parameters  
+        InputValidator.validate_integer(attention_heads, min_val=1, max_val=32)
+        if hidden_dims[-1] % attention_heads != 0:
+            raise ValidationError(f"Hidden dim {hidden_dims[-1]} not divisible by attention heads {attention_heads}")
+        
+        # Validate dropout
+        InputValidator.validate_numeric(dropout, min_val=0.0, max_val=0.9)
+        
+        # Validate graph layers
+        InputValidator.validate_integer(graph_layers, min_val=1, max_val=20)
+        
+        # Validate choices
+        InputValidator.validate_enum(activation, ["relu", "gelu", "elu", "swish"])
+        InputValidator.validate_enum(normalization, ["layer", "batch", "instance", "graph"])
+        InputValidator.validate_enum(pooling, ["mean", "max", "attention", "set2set", "sort"])
+        
+        # Validate task parameters
+        if num_classes is not None:
+            InputValidator.validate_integer(num_classes, min_val=2, max_val=1000)
+            
+        InputValidator.validate_integer(regression_targets, min_val=0, max_val=100)
+        
+        if num_classes is None and regression_targets == 0:
+            warnings.warn("No classification or regression targets specified - model will only do pretraining")
+    
     def _create_pooling_layer(
         self, pooling: str, hidden_dim: int, attention_heads: int
     ) -> nn.Module:
@@ -192,7 +276,7 @@ class DGDMModel(nn.Module):
         return_embeddings: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass through DGDM model.
+        Forward pass through DGDM model with comprehensive error handling.
         
         Args:
             data: Graph data (single graph or batch)
@@ -202,18 +286,53 @@ class DGDMModel(nn.Module):
             
         Returns:
             Dictionary containing model outputs
+            
+        Raises:
+            ModelInferenceError: If forward pass fails
+            ValidationError: If input validation fails
         """
-        outputs = {}
         
-        # Feature encoding
-        node_features = self.feature_encoder(data.x)
-        
-        # Graph encoding
-        graph_outputs = self.graph_encoder(
-            node_features, data.edge_index, data.edge_attr, data.batch
-        )
-        
-        node_embeddings = graph_outputs["embeddings"]
+        # Input validation and monitoring
+        with monitor_operation(f"dgdm_forward_{mode}"):
+            try:
+                self._validate_forward_inputs(data, mode, return_attention, return_embeddings)
+            except Exception as e:
+                self.logger.error(f"Forward input validation failed: {e}")
+                raise ModelInferenceError(f"Input validation failed: {e}")
+                
+            outputs = {}
+            
+            try:
+                # Feature encoding with error handling
+                with monitor_operation("feature_encoding"):
+                    self._validate_input_features(data.x)
+                    node_features = self.feature_encoder(data.x)
+                    
+            except Exception as e:
+                self.logger.error(f"Feature encoding failed: {e}")
+                raise ModelInferenceError(f"Feature encoding failed: {e}")
+            
+            try:
+                # Graph encoding with error handling  
+                with monitor_operation("graph_encoding"):
+                    graph_outputs = self.graph_encoder(
+                        node_features, data.edge_index, data.edge_attr, data.batch
+                    )
+                    node_embeddings = graph_outputs["embeddings"]
+                    
+            except Exception as e:
+                self.logger.error(f"Graph encoding failed: {e}")
+                raise ModelInferenceError(f"Graph encoding failed: {e}")
+            
+            try:
+                # Continue with the rest of the forward pass
+                return self._forward_continue(node_embeddings, data, mode, return_attention, return_embeddings, outputs)
+                
+            except Exception as e:
+                self.logger.error(f"Forward pass failed: {e}")
+                raise ModelInferenceError(f"Forward pass failed: {e}")
+    
+    def _forward_continue(self, node_embeddings, data, mode, return_attention, return_embeddings, outputs):
         
         # Spatial attention if enabled
         attention_weights = None
@@ -521,3 +640,76 @@ class GlobalSet2SetPool(nn.Module):
                 out[i] = batch_x.mean(dim=0)
                 
         return out
+
+
+# Add validation methods for the DGDM model class - need to be added as methods
+def _validate_forward_inputs(self, data, mode, return_attention, return_embeddings):
+    """Validate inputs to forward pass."""
+    
+    # Validate data object
+    if not isinstance(data, (Data, Batch)):
+        raise ValidationError(f"Expected Data or Batch, got {type(data)}")
+        
+    # Check required attributes
+    required_attrs = ['x', 'edge_index']
+    for attr in required_attrs:
+        if not hasattr(data, attr):
+            raise ValidationError(f"Graph data missing required attribute: {attr}")
+            
+    # Validate mode
+    InputValidator.validate_enum(mode, ["inference", "pretrain", "finetune"])
+    
+    # Validate boolean flags
+    InputValidator.validate_boolean(return_attention)
+    InputValidator.validate_boolean(return_embeddings)
+    
+    # Validate tensor shapes
+    if data.x.dim() != 2:
+        raise ValidationError(f"Node features must be 2D, got shape {data.x.shape}")
+        
+    if data.edge_index.dim() != 2 or data.edge_index.size(0) != 2:
+        raise ValidationError(f"Edge index must be 2xN, got shape {data.edge_index.shape}")
+        
+    # Check for NaN or infinity values
+    if torch.isnan(data.x).any():
+        raise ValidationError("Node features contain NaN values")
+        
+    if torch.isinf(data.x).any():
+        raise ValidationError("Node features contain infinity values")
+        
+    # Validate feature dimensions
+    if data.x.size(1) != self.node_features:
+        raise ValidationError(f"Expected {self.node_features} node features, got {data.x.size(1)}")
+        
+    # Validate edge indices are within node range
+    max_node_idx = data.x.size(0) - 1
+    if data.edge_index.max() > max_node_idx:
+        raise ValidationError(f"Edge index contains invalid node indices")
+        
+    if data.edge_index.min() < 0:
+        raise ValidationError(f"Edge index contains negative node indices")
+
+def _validate_input_features(self, features):
+    """Validate input node features."""
+    
+    # Check for empty features
+    if features.numel() == 0:
+        raise ValidationError("Input features are empty")
+        
+    # Check for extreme values
+    if features.abs().max() > 1000:
+        warnings.warn(f"Large feature values detected: max={features.abs().max()}")
+        
+    # Check feature distribution
+    if features.std() < 1e-6:
+        warnings.warn("Input features have very low variance")
+        
+    # Memory check
+    feature_memory = features.numel() * features.element_size()
+    if feature_memory > 1e9:  # 1GB
+        warnings.warn(f"Large feature tensor detected: {feature_memory/1e9:.1f}GB")
+
+
+# These methods need to be added to the DGDMModel class
+DGDMModel._validate_forward_inputs = _validate_forward_inputs
+DGDMModel._validate_input_features = _validate_input_features
