@@ -192,6 +192,50 @@ class InputValidator:
         return value
     
     @staticmethod
+    def validate_positive_number(value: Any, field_name: str) -> float:
+        """Validate that a value is a positive number."""
+        try:
+            num_val = float(value)
+            if num_val <= 0:
+                raise ValidationError(f"{field_name} must be positive, got {num_val}")
+            return num_val
+        except (ValueError, TypeError):
+            raise ValidationError(f"Invalid numeric value for {field_name}: {value}")
+    
+    @staticmethod
+    def validate_range(value: Any, min_val: float, max_val: float, field_name: str) -> float:
+        """Validate that a value is within a specified range."""
+        try:
+            num_val = float(value)
+            if not (min_val <= num_val <= max_val):
+                raise ValidationError(f"{field_name} must be between {min_val} and {max_val}, got {num_val}")
+            return num_val
+        except (ValueError, TypeError):
+            raise ValidationError(f"Invalid numeric value for {field_name}: {value}")
+    
+    @staticmethod
+    def validate_quantum_state(state: Any) -> Any:
+        """Validate quantum state array."""
+        import numpy as np
+        
+        if not isinstance(state, np.ndarray):
+            raise ValidationError("Quantum state must be numpy array")
+        
+        if not np.iscomplexobj(state):
+            raise ValidationError("Quantum state must have complex dtype")
+        
+        # Check for NaN or infinite values
+        if not np.all(np.isfinite(state)):
+            raise ValidationError("Quantum state contains NaN or infinite values")
+        
+        # Check normalization
+        norm = np.linalg.norm(state)
+        if abs(norm - 1.0) > 1e-6:
+            raise ValidationError(f"Quantum state not normalized: norm = {norm}")
+        
+        return state
+    
+    @staticmethod
     def validate_model_config(config: Dict[str, Any]) -> Dict[str, Any]:
         """Validate model configuration."""
         validated = {}
