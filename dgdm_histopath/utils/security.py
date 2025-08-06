@@ -1,4 +1,10 @@
-"""Security utilities and safety measures."""
+"""
+Advanced security hardening system for DGDM Histopath Lab.
+
+Implements comprehensive security measures including authentication,
+authorization, data encryption, and vulnerability protection for
+medical AI applications in clinical environments.
+"""
 
 import os
 import hashlib
@@ -6,19 +12,52 @@ import secrets
 import logging
 import json
 import time
-from typing import Dict, Any, Optional, List, Tuple
+import re
+import tempfile
+import shutil
+from typing import Dict, Any, Optional, List, Tuple, Union, Callable
 from pathlib import Path
 from datetime import datetime, timedelta
+from dataclasses import dataclass, asdict
+from functools import wraps
+from contextlib import contextmanager
 import hmac
 import base64
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    CRYPTOGRAPHY_AVAILABLE = False
+    logging.warning("Cryptography library not available - some security features disabled")
+
+from dgdm_histopath.utils.exceptions import (
+    SecurityError, ClinicalValidationError, global_exception_handler
+)
 
 
-class SecurityError(Exception):
-    """Custom exception for security-related errors."""
-    pass
+@dataclass
+class SecurityAuditEvent:
+    """Enhanced security audit event for compliance tracking."""
+    event_type: str
+    user_id: Optional[str]
+    resource: str
+    action: str
+    outcome: str  # 'success', 'failure', 'blocked'
+    timestamp: datetime
+    ip_address: Optional[str] = None
+    session_id: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+    risk_level: str = 'low'  # 'low', 'medium', 'high', 'critical'
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for logging."""
+        return {
+            **asdict(self),
+            'timestamp': self.timestamp.isoformat()
+        }
 
 
 class RateLimiter:
@@ -66,13 +105,19 @@ class RateLimiter:
         return self.max_requests
 
 
-class SecurityAuditor:
-    """Security auditing and compliance checking."""
+class AdvancedSecurityAuditor:
+    """Advanced security auditing with HIPAA compliance and threat detection."""
     
     def __init__(self, audit_log_path: Optional[Path] = None):
         self.audit_log_path = audit_log_path or Path("logs/security_audit.log")
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
+        self.failed_attempts = {}
+        self.suspicious_activities = []
+        
+        # HIPAA compliance settings
+        self.hipaa_retention_days = 2555  # 7 years
+        self.require_integrity_checks = True
     
     def log_security_event(self, event_type: str, details: Dict[str, Any], severity: str = "INFO"):
         """Log security-related events."""
@@ -423,10 +468,278 @@ class SecureStorage:
         self.storage_path.chmod(0o600)
 
 
-# Global instances
+class VulnerabilityScanner:
+    """Advanced vulnerability scanning for security hardening."""
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        
+        # Known vulnerable patterns
+        self.vulnerability_patterns = {
+            'sql_injection': [
+                r"'\s*or\s*'1'\s*=\s*'1",
+                r"'\s*;\s*drop\s+table",
+                r"union\s+select"
+            ],
+            'command_injection': [
+                r";\s*rm\s+-rf",
+                r"|\s*cat\s+/etc/passwd",
+                r"&&\s*curl"
+            ],
+            'path_traversal': [
+                r"\.\./.*\.\./",
+                r"/etc/passwd",
+                r"/proc/self/environ"
+            ],
+            'code_injection': [
+                r"__import__\s*\(",
+                r"exec\s*\(",
+                r"eval\s*\("
+            ]
+        }
+    
+    def scan_input(self, input_data: str) -> Dict[str, Any]:
+        """Scan input for vulnerabilities."""
+        vulnerabilities = []
+        risk_score = 0
+        
+        for vuln_type, patterns in self.vulnerability_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, input_data, re.IGNORECASE):
+                    vulnerabilities.append({
+                        'type': vuln_type,
+                        'pattern': pattern,
+                        'severity': 'high'
+                    })
+                    risk_score += 10
+        
+        return {
+            'vulnerabilities': vulnerabilities,
+            'risk_score': min(risk_score, 100),
+            'safe': len(vulnerabilities) == 0
+        }
+    
+    def scan_file_permissions(self, directory: Path) -> Dict[str, Any]:
+        """Scan for insecure file permissions."""
+        issues = []
+        
+        for file_path in directory.rglob('*'):
+            if file_path.is_file():
+                stat = file_path.stat()
+                mode = stat.st_mode
+                
+                # Check for world-writable files
+                if mode & 0o002:
+                    issues.append({
+                        'file': str(file_path),
+                        'issue': 'world_writable',
+                        'severity': 'high',
+                        'permissions': oct(mode)[-3:]
+                    })
+                
+                # Check for world-readable sensitive files
+                sensitive_patterns = ['key', 'secret', 'password', 'token', 'private']
+                if mode & 0o004 and any(pattern in file_path.name.lower() for pattern in sensitive_patterns):
+                    issues.append({
+                        'file': str(file_path),
+                        'issue': 'sensitive_world_readable',
+                        'severity': 'medium',
+                        'permissions': oct(mode)[-3:]
+                    })
+        
+        return {
+            'issues_found': len(issues),
+            'issues': issues
+        }
+
+
+class PHIDetector:
+    """Detect Protected Health Information in medical data."""
+    
+    def __init__(self):
+        self.phi_patterns = {
+            'ssn': r'\b\d{3}-\d{2}-\d{4}\b',
+            'phone': r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b',
+            'email': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+            'date_of_birth': r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',
+            'mrn': r'\b(MRN|Medical Record Number)\s*:?\s*\d+\b',
+            'address': r'\b\d{1,5}\s\w+\s(St|Street|Ave|Avenue|Dr|Drive|Rd|Road)\b',
+            'name': r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b'  # Simple name pattern
+        }
+        self.logger = logging.getLogger(__name__)
+    
+    def detect_phi(self, text: str) -> Dict[str, Any]:
+        """Detect PHI in text."""
+        detected = []
+        
+        for phi_type, pattern in self.phi_patterns.items():
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                detected.append({
+                    'type': phi_type,
+                    'text': match.group(),
+                    'start': match.start(),
+                    'end': match.end(),
+                    'confidence': self._calculate_confidence(phi_type, match.group())
+                })
+        
+        return {
+            'phi_detected': len(detected) > 0,
+            'phi_count': len(detected),
+            'detections': detected,
+            'risk_level': 'high' if len(detected) > 0 else 'low'
+        }
+    
+    def _calculate_confidence(self, phi_type: str, text: str) -> float:
+        """Calculate confidence score for PHI detection."""
+        # Simple confidence scoring
+        confidence_scores = {
+            'ssn': 0.95,
+            'phone': 0.8,
+            'email': 0.9,
+            'date_of_birth': 0.7,
+            'mrn': 0.9,
+            'address': 0.7,
+            'name': 0.6  # Names are harder to detect accurately
+        }
+        return confidence_scores.get(phi_type, 0.5)
+    
+    def anonymize_text(self, text: str, replacement_map: Optional[Dict[str, str]] = None) -> str:
+        """Anonymize text by replacing PHI with placeholders."""
+        if replacement_map is None:
+            replacement_map = {
+                'ssn': '[SSN_REDACTED]',
+                'phone': '[PHONE_REDACTED]',
+                'email': '[EMAIL_REDACTED]',
+                'date_of_birth': '[DOB_REDACTED]',
+                'mrn': '[MRN_REDACTED]',
+                'address': '[ADDRESS_REDACTED]',
+                'name': '[NAME_REDACTED]'
+            }
+        
+        anonymized = text
+        detections = self.detect_phi(text)
+        
+        # Sort by position in reverse order to maintain indices
+        sorted_detections = sorted(detections['detections'], key=lambda x: x['start'], reverse=True)
+        
+        for detection in sorted_detections:
+            if detection['confidence'] > 0.7:  # Only anonymize high-confidence matches
+                replacement = replacement_map.get(detection['type'], '[REDACTED]')
+                anonymized = (
+                    anonymized[:detection['start']] +
+                    replacement +
+                    anonymized[detection['end']:]
+                )
+        
+        return anonymized
+
+
+# Enhanced security decorators
+def require_security_clearance(clearance_level: str):
+    """Decorator to require security clearance for sensitive operations."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            user_clearance = kwargs.get('user_clearance', 'none')
+            
+            clearance_levels = {'none': 0, 'basic': 1, 'elevated': 2, 'admin': 3, 'root': 4}
+            required_level = clearance_levels.get(clearance_level, 0)
+            user_level = clearance_levels.get(user_clearance, 0)
+            
+            if user_level < required_level:
+                raise SecurityError(
+                    f"Insufficient security clearance: required {clearance_level}, have {user_clearance}",
+                    severity="CRITICAL"
+                )
+            
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def audit_access(resource_type: str, action: str):
+    """Decorator to audit resource access."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            user_id = kwargs.get('user_id', 'unknown')
+            start_time = time.time()
+            
+            try:
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+                
+                # Log successful access
+                security_auditor.log_security_event(
+                    f"{resource_type}_access",
+                    {
+                        'user_id': user_id,
+                        'action': action,
+                        'resource': resource_type,
+                        'duration': duration,
+                        'success': True
+                    },
+                    severity="INFO"
+                )
+                
+                return result
+                
+            except Exception as e:
+                duration = time.time() - start_time
+                
+                # Log failed access
+                security_auditor.log_security_event(
+                    f"{resource_type}_access_failed",
+                    {
+                        'user_id': user_id,
+                        'action': action,
+                        'resource': resource_type,
+                        'duration': duration,
+                        'error': str(e),
+                        'success': False
+                    },
+                    severity="WARNING"
+                )
+                
+                raise
+                
+        return wrapper
+    return decorator
+
+
+@contextmanager
+def secure_temp_directory():
+    """Create secure temporary directory with proper cleanup."""
+    temp_dir = None
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix='dgdm_secure_'))
+        temp_dir.chmod(0o700)  # Only owner can access
+        yield temp_dir
+    finally:
+        if temp_dir and temp_dir.exists():
+            # Secure deletion of temporary directory
+            for file_path in temp_dir.rglob('*'):
+                if file_path.is_file():
+                    try:
+                        # Overwrite file with random data
+                        file_size = file_path.stat().st_size
+                        with open(file_path, 'r+b') as f:
+                            f.write(secrets.token_bytes(file_size))
+                            f.flush()
+                            os.fsync(f.fileno())
+                    except Exception:
+                        pass
+            
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# Global enhanced instances
 rate_limiter = RateLimiter()
-security_auditor = SecurityAuditor()
+security_auditor = AdvancedSecurityAuditor()
 input_sanitizer = InputSanitizer()
+vulnerability_scanner = VulnerabilityScanner()
+phi_detector = PHIDetector()
 
 
 def generate_api_key(length: int = 32) -> str:
