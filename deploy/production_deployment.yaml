@@ -1,0 +1,495 @@
+# DGDM Quantum-Enhanced Medical AI Platform - Production Deployment
+# Kubernetes manifest for production-grade deployment
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dgdm-quantum
+  labels:
+    environment: production
+    application: dgdm-quantum-medical-ai
+
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dgdm-config
+  namespace: dgdm-quantum
+data:
+  config.yaml: |
+    quantum_framework:
+      planner:
+        max_concurrent_tasks: 32
+        quantum_coherence_time: 30.0
+        enable_quantum_acceleration: true
+      
+      scheduler:
+        max_concurrent_jobs: 16
+        resource_monitoring_interval: 5.0
+        enable_auto_scaling: true
+      
+      optimizer:
+        strategy: "quantum_annealing"
+        max_evaluations: 200
+        convergence_threshold: 1e-6
+      
+      security:
+        security_level: "HIGH"
+        max_failed_attempts: 3
+        lockout_duration: 300.0
+        enable_audit_logging: true
+    
+    performance:
+      cache:
+        max_size_mb: 2048
+        ttl_seconds: 3600
+        strategy: "lru"
+      
+      gpu:
+        memory_fraction: 0.8
+        enable_memory_pool: true
+      
+      distributed:
+        enable_auto_scaling: true
+        max_nodes: 20
+        heartbeat_interval: 10.0
+
+---
+# Secret for sensitive configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dgdm-secrets
+  namespace: dgdm-quantum
+type: Opaque
+data:
+  # Base64 encoded secrets (replace with actual values)
+  master_key: UXVhbnR1bUVuaGFuY2VkTWVkaWNhbEFJUGxhdGZvcm0=
+  redis_password: UmVkaXNQYXNzd29yZDEyMw==
+  postgres_password: UG9zdGdyZXNQYXNzd29yZDEyMw==
+
+---
+# Redis deployment for distributed coordination
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: dgdm-quantum
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: dgdm-secrets
+              key: redis_password
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: dgdm-quantum
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+
+---
+# DGDM Quantum Master Node Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dgdm-quantum-master
+  namespace: dgdm-quantum
+  labels:
+    app: dgdm-quantum
+    component: master
+spec:
+  replicas: 2  # High availability
+  selector:
+    matchLabels:
+      app: dgdm-quantum
+      component: master
+  template:
+    metadata:
+      labels:
+        app: dgdm-quantum
+        component: master
+    spec:
+      containers:
+      - name: dgdm-quantum
+        image: dgdm-quantum:latest
+        ports:
+        - containerPort: 8000
+          name: api
+        - containerPort: 8001
+          name: quantum
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: NODE_TYPE
+          value: "MASTER"
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: dgdm-secrets
+              key: redis_password
+        - name: MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: dgdm-secrets
+              key: master_key
+        - name: PYTHONPATH
+          value: "/app"
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        - name: data
+          mountPath: /app/data
+        - name: logs
+          mountPath: /app/logs
+        resources:
+          requests:
+            cpu: 2
+            memory: 4Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: 8
+            memory: 16Gi
+            nvidia.com/gpu: 2
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: dgdm-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: dgdm-data-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: dgdm-logs-pvc
+
+---
+# DGDM Quantum Worker Node Deployment  
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dgdm-quantum-worker
+  namespace: dgdm-quantum
+  labels:
+    app: dgdm-quantum
+    component: worker
+spec:
+  replicas: 4  # Scalable workers
+  selector:
+    matchLabels:
+      app: dgdm-quantum
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: dgdm-quantum
+        component: worker
+    spec:
+      containers:
+      - name: dgdm-quantum-worker
+        image: dgdm-quantum:latest
+        ports:
+        - containerPort: 8000
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: NODE_TYPE
+          value: "GPU_WORKER"
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: dgdm-secrets
+              key: redis_password
+        - name: MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: dgdm-secrets
+              key: master_key
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        - name: shared-data
+          mountPath: /app/shared
+        resources:
+          requests:
+            cpu: 4
+            memory: 8Gi
+            nvidia.com/gpu: 2
+          limits:
+            cpu: 8
+            memory: 32Gi
+            nvidia.com/gpu: 4
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: dgdm-config
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: dgdm-shared-pvc
+
+---
+# Master Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: dgdm-quantum-master-service
+  namespace: dgdm-quantum
+  labels:
+    app: dgdm-quantum
+    component: master
+spec:
+  type: LoadBalancer
+  selector:
+    app: dgdm-quantum
+    component: master
+  ports:
+  - port: 80
+    targetPort: 8000
+    name: api
+  - port: 8001
+    targetPort: 8001
+    name: quantum
+  - port: 9090
+    targetPort: 9090
+    name: metrics
+
+---
+# Worker Service (Internal)
+apiVersion: v1
+kind: Service
+metadata:
+  name: dgdm-quantum-worker-service
+  namespace: dgdm-quantum
+  labels:
+    app: dgdm-quantum
+    component: worker
+spec:
+  type: ClusterIP
+  selector:
+    app: dgdm-quantum
+    component: worker
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: worker
+  - port: 9090
+    targetPort: 9090
+    name: metrics
+
+---
+# Horizontal Pod Autoscaler for Workers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: dgdm-quantum-worker-hpa
+  namespace: dgdm-quantum
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: dgdm-quantum-worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: nvidia.com/gpu
+      target:
+        type: Utilization
+        averageUtilization: 75
+
+---
+# Persistent Volume Claims
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dgdm-data-pvc
+  namespace: dgdm-quantum
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dgdm-logs-pvc
+  namespace: dgdm-quantum
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: standard
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dgdm-shared-pvc
+  namespace: dgdm-quantum
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: fast-ssd
+
+---
+# Network Policy for Security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dgdm-quantum-network-policy
+  namespace: dgdm-quantum
+spec:
+  podSelector:
+    matchLabels:
+      app: dgdm-quantum
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: dgdm-quantum
+    ports:
+    - protocol: TCP
+      port: 8000
+    - protocol: TCP
+      port: 8001
+  - from: []  # Allow external access to master API
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to: []  # Allow all outbound (for external APIs, downloads, etc.)
+
+---
+# Monitoring ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dgdm-quantum-metrics
+  namespace: dgdm-quantum
+  labels:
+    app: dgdm-quantum
+spec:
+  selector:
+    matchLabels:
+      app: dgdm-quantum
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dgdm-quantum-master-pdb
+  namespace: dgdm-quantum
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: dgdm-quantum
+      component: master
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dgdm-quantum-worker-pdb
+  namespace: dgdm-quantum
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: dgdm-quantum
+      component: worker
