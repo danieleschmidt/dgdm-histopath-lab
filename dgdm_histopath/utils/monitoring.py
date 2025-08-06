@@ -1,4 +1,9 @@
-"""System monitoring and health check utilities."""
+"""
+Advanced real-time monitoring and alerting system for DGDM Histopath Lab.
+
+Provides comprehensive monitoring of system performance, model behavior,
+and clinical deployment metrics with automated alerting capabilities.
+"""
 
 import time
 import psutil
@@ -7,17 +12,25 @@ import logging
 import json
 import os
 import gc
-from typing import Dict, Any, List, Optional, Callable
+import queue
+import numpy as np
+from typing import Dict, Any, List, Optional, Callable, Union
 from datetime import datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from contextlib import contextmanager
+from collections import defaultdict, deque
 import warnings
+import hashlib
+
+from dgdm_histopath.utils.exceptions import (
+    PerformanceError, ResourceError, global_exception_handler
+)
 
 
 @dataclass
 class SystemMetrics:
-    """System performance metrics."""
+    """Enhanced system performance metrics."""
     timestamp: str
     cpu_percent: float
     memory_percent: float
@@ -26,6 +39,10 @@ class SystemMetrics:
     gpu_memory_used: Optional[int] = None
     gpu_memory_total: Optional[int] = None
     gpu_utilization: Optional[float] = None
+    network_io_sent: Optional[int] = None
+    network_io_recv: Optional[int] = None
+    load_average: Optional[float] = None
+    open_files: Optional[int] = None
     
 
 @dataclass  
@@ -44,51 +61,104 @@ class PerformanceMetrics:
             self.timestamp = datetime.now().isoformat()
 
 
-class MetricsCollector:
-    """Collect and store performance metrics."""
+class AdvancedMetricsCollector:
+    """Advanced metrics collector with real-time alerting and analytics."""
     
-    def __init__(self, max_history: int = 1000):
+    def __init__(self, max_history: int = 10000):
         self.max_history = max_history
         self.system_metrics: List[SystemMetrics] = []
         self.performance_metrics: List[PerformanceMetrics] = []
+        self.custom_metrics = defaultdict(lambda: deque(maxlen=max_history))
         self.lock = threading.Lock()
         self.logger = logging.getLogger(__name__)
+        self.alert_queue = queue.Queue()
+        self.collection_callbacks = []
         
-        # GPU availability check
+        # Enhanced GPU availability check
         self.gpu_available = False
+        self.gpu_count = 0
         try:
             import torch
             self.gpu_available = torch.cuda.is_available()
             if self.gpu_available:
                 self.torch = torch
+                self.gpu_count = torch.cuda.device_count()
         except ImportError:
             pass
+        
+        # Initialize network IO baseline
+        self.network_io_baseline = psutil.net_io_counters()
+        
+        # Performance thresholds for alerts
+        self.alert_thresholds = {
+            'cpu_percent': {'warning': 80, 'critical': 95},
+            'memory_percent': {'warning': 85, 'critical': 95},
+            'disk_usage_percent': {'warning': 85, 'critical': 95},
+            'gpu_memory_percent': {'warning': 85, 'critical': 95}
+        }
     
     def collect_system_metrics(self) -> SystemMetrics:
-        """Collect current system metrics."""
+        """Collect comprehensive system metrics."""
         try:
+            # Basic system metrics
+            vm = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            # Network IO metrics
+            current_net_io = psutil.net_io_counters()
+            
             metrics = SystemMetrics(
                 timestamp=datetime.now().isoformat(),
                 cpu_percent=psutil.cpu_percent(interval=0.1),
-                memory_percent=psutil.virtual_memory().percent,
-                memory_available=psutil.virtual_memory().available,
-                disk_usage_percent=psutil.disk_usage('/').percent
+                memory_percent=vm.percent,
+                memory_available=vm.available,
+                disk_usage_percent=(disk.used / disk.total) * 100,
+                network_io_sent=current_net_io.bytes_sent - self.network_io_baseline.bytes_sent,
+                network_io_recv=current_net_io.bytes_recv - self.network_io_baseline.bytes_recv,
+                load_average=os.getloadavg()[0] if hasattr(os, 'getloadavg') else None,
+                open_files=len(psutil.Process().open_files()) if hasattr(psutil.Process(), 'open_files') else None
             )
             
-            # Add GPU metrics if available
-            if self.gpu_available:
+            # Enhanced GPU metrics for multiple GPUs
+            if self.gpu_available and self.gpu_count > 0:
                 try:
-                    memory_info = self.torch.cuda.mem_get_info()
-                    metrics.gpu_memory_total = memory_info[1]
-                    metrics.gpu_memory_used = memory_info[1] - memory_info[0]
-                    metrics.gpu_utilization = self.torch.cuda.utilization()
+                    total_gpu_memory = 0
+                    total_gpu_used = 0
+                    gpu_utilizations = []
+                    
+                    for gpu_id in range(self.gpu_count):
+                        memory_info = self.torch.cuda.mem_get_info(gpu_id)
+                        total_gpu_memory += memory_info[1]
+                        total_gpu_used += memory_info[1] - memory_info[0]
+                        
+                        # Try to get utilization if pynvml is available
+                        try:
+                            import pynvml
+                            if not hasattr(self, 'nvml_initialized'):
+                                pynvml.nvmlInit()
+                                self.nvml_initialized = True
+                            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+                            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                            gpu_utilizations.append(util.gpu)
+                        except ImportError:
+                            pass
+                    
+                    metrics.gpu_memory_total = total_gpu_memory
+                    metrics.gpu_memory_used = total_gpu_used
+                    if gpu_utilizations:
+                        metrics.gpu_utilization = sum(gpu_utilizations) / len(gpu_utilizations)
+                        
                 except Exception as e:
                     self.logger.debug(f"Failed to collect GPU metrics: {e}")
-                    
+            
+            # Check for alert conditions
+            self._check_metric_alerts(metrics)
+            
             return metrics
             
         except Exception as e:
             self.logger.error(f"Failed to collect system metrics: {e}")
+            global_exception_handler.handle_exception(e, reraise=False)
             raise
     
     def record_system_metrics(self):
@@ -137,34 +207,161 @@ class MetricsCollector:
         }
     
     def _compute_summary(self, system_metrics: List[SystemMetrics], performance_metrics: List[PerformanceMetrics]) -> Dict[str, Any]:
-        """Compute summary statistics."""
+        """Compute enhanced summary statistics with trend analysis."""
         summary = {
             'period_minutes': 5,
             'system_health': 'unknown',
             'avg_cpu_percent': 0,
             'avg_memory_percent': 0,
+            'max_cpu_percent': 0,
+            'max_memory_percent': 0,
             'total_operations': len(performance_metrics),
             'failed_operations': 0,
-            'avg_operation_duration': 0
+            'success_rate': 0,
+            'avg_operation_duration': 0,
+            'p95_operation_duration': 0,
+            'network_throughput_mbps': 0,
+            'gpu_utilization': 0,
+            'trends': {}
         }
         
         if system_metrics:
-            summary['avg_cpu_percent'] = sum(m.cpu_percent for m in system_metrics) / len(system_metrics)
-            summary['avg_memory_percent'] = sum(m.memory_percent for m in system_metrics) / len(system_metrics)
+            cpu_values = [m.cpu_percent for m in system_metrics]
+            memory_values = [m.memory_percent for m in system_metrics]
             
-            # Determine system health
-            if summary['avg_cpu_percent'] > 90 or summary['avg_memory_percent'] > 90:
+            summary['avg_cpu_percent'] = np.mean(cpu_values)
+            summary['avg_memory_percent'] = np.mean(memory_values)
+            summary['max_cpu_percent'] = np.max(cpu_values)
+            summary['max_memory_percent'] = np.max(memory_values)
+            
+            # Network throughput calculation
+            if len(system_metrics) > 1 and system_metrics[-1].network_io_sent:
+                time_diff = (datetime.fromisoformat(system_metrics[-1].timestamp) - 
+                           datetime.fromisoformat(system_metrics[0].timestamp)).total_seconds()
+                if time_diff > 0:
+                    bytes_diff = (system_metrics[-1].network_io_sent + system_metrics[-1].network_io_recv)
+                    summary['network_throughput_mbps'] = (bytes_diff * 8) / (time_diff * 1024 * 1024)
+            
+            # GPU utilization
+            gpu_utils = [m.gpu_utilization for m in system_metrics if m.gpu_utilization is not None]
+            if gpu_utils:
+                summary['gpu_utilization'] = np.mean(gpu_utils)
+            
+            # Trend analysis (simple linear trend)
+            if len(system_metrics) >= 3:
+                cpu_trend = self._calculate_trend(cpu_values)
+                memory_trend = self._calculate_trend(memory_values)
+                summary['trends'] = {
+                    'cpu_trend': 'increasing' if cpu_trend > 0.1 else 'decreasing' if cpu_trend < -0.1 else 'stable',
+                    'memory_trend': 'increasing' if memory_trend > 0.1 else 'decreasing' if memory_trend < -0.1 else 'stable'
+                }
+            
+            # Enhanced system health determination
+            if summary['max_cpu_percent'] > 95 or summary['max_memory_percent'] > 95:
                 summary['system_health'] = 'critical'
-            elif summary['avg_cpu_percent'] > 70 or summary['avg_memory_percent'] > 70:
+            elif summary['avg_cpu_percent'] > 85 or summary['avg_memory_percent'] > 85:
                 summary['system_health'] = 'warning'
+            elif summary['trends'].get('cpu_trend') == 'increasing' and summary['avg_cpu_percent'] > 70:
+                summary['system_health'] = 'degrading'
             else:
                 summary['system_health'] = 'healthy'
                 
         if performance_metrics:
-            summary['failed_operations'] = sum(1 for m in performance_metrics if not m.success)
-            summary['avg_operation_duration'] = sum(m.duration for m in performance_metrics) / len(performance_metrics)
+            failed = sum(1 for m in performance_metrics if not m.success)
+            summary['failed_operations'] = failed
+            summary['success_rate'] = 1.0 - (failed / len(performance_metrics))
+            
+            durations = [m.duration for m in performance_metrics]
+            summary['avg_operation_duration'] = np.mean(durations)
+            summary['p95_operation_duration'] = np.percentile(durations, 95)
             
         return summary
+    
+    def _calculate_trend(self, values: List[float]) -> float:
+        """Calculate simple linear trend slope."""
+        if len(values) < 2:
+            return 0.0
+        
+        x = np.arange(len(values))
+        y = np.array(values)
+        
+        # Simple linear regression
+        n = len(values)
+        x_mean = np.mean(x)
+        y_mean = np.mean(y)
+        
+        slope = np.sum((x - x_mean) * (y - y_mean)) / np.sum((x - x_mean) ** 2)
+        return slope
+    
+    def _check_metric_alerts(self, metrics: SystemMetrics) -> None:
+        """Check metrics against alert thresholds."""
+        alerts = []
+        
+        # CPU alerts
+        if metrics.cpu_percent > self.alert_thresholds['cpu_percent']['critical']:
+            alerts.append(('critical', f'CPU usage critical: {metrics.cpu_percent:.1f}%'))
+        elif metrics.cpu_percent > self.alert_thresholds['cpu_percent']['warning']:
+            alerts.append(('warning', f'CPU usage high: {metrics.cpu_percent:.1f}%'))
+        
+        # Memory alerts
+        if metrics.memory_percent > self.alert_thresholds['memory_percent']['critical']:
+            alerts.append(('critical', f'Memory usage critical: {metrics.memory_percent:.1f}%'))
+        elif metrics.memory_percent > self.alert_thresholds['memory_percent']['warning']:
+            alerts.append(('warning', f'Memory usage high: {metrics.memory_percent:.1f}%'))
+        
+        # GPU memory alerts
+        if metrics.gpu_memory_used and metrics.gpu_memory_total:
+            gpu_percent = (metrics.gpu_memory_used / metrics.gpu_memory_total) * 100
+            if gpu_percent > self.alert_thresholds['gpu_memory_percent']['critical']:
+                alerts.append(('critical', f'GPU memory critical: {gpu_percent:.1f}%'))
+            elif gpu_percent > self.alert_thresholds['gpu_memory_percent']['warning']:
+                alerts.append(('warning', f'GPU memory high: {gpu_percent:.1f}%'))
+        
+        # Queue alerts for processing
+        for severity, message in alerts:
+            try:
+                self.alert_queue.put_nowait({'severity': severity, 'message': message, 'timestamp': metrics.timestamp})
+            except queue.Full:
+                self.logger.warning("Alert queue full, dropping alert")
+    
+    def add_collection_callback(self, callback: Callable[[SystemMetrics], None]) -> None:
+        """Add callback for metric collection events."""
+        self.collection_callbacks.append(callback)
+    
+    def record_custom_metric(self, name: str, value: Union[float, int], tags: Optional[Dict[str, str]] = None) -> None:
+        """Record custom application metrics."""
+        with self.lock:
+            metric_data = {
+                'value': value,
+                'timestamp': datetime.now().isoformat(),
+                'tags': tags or {}
+            }
+            self.custom_metrics[name].append(metric_data)
+    
+    def get_custom_metric_stats(self, name: str, minutes: int = 5) -> Dict[str, Any]:
+        """Get statistics for custom metrics."""
+        cutoff_time = datetime.now() - timedelta(minutes=minutes)
+        
+        with self.lock:
+            recent_values = [
+                entry for entry in self.custom_metrics[name]
+                if datetime.fromisoformat(entry['timestamp']) > cutoff_time
+            ]
+        
+        if not recent_values:
+            return {}
+        
+        values = [entry['value'] for entry in recent_values]
+        return {
+            'count': len(values),
+            'mean': np.mean(values),
+            'std': np.std(values),
+            'min': np.min(values),
+            'max': np.max(values),
+            'p50': np.percentile(values, 50),
+            'p95': np.percentile(values, 95),
+            'p99': np.percentile(values, 99)
+        }
     
     def export_metrics(self, output_path: Path):
         """Export metrics to JSON file."""
@@ -179,8 +376,8 @@ class MetricsCollector:
             json.dump(data, f, indent=2)
 
 
-# Global metrics collector instance
-metrics_collector = MetricsCollector()
+# Global enhanced metrics collector instance
+metrics_collector = AdvancedMetricsCollector()
 
 
 class HealthChecker:
