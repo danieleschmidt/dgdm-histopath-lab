@@ -269,147 +269,151 @@ def _execute_training(
         logger.info("Setting up data module...")
         try:
             data_module = HistopathDataModule(
-        data_dir=data_dir,
-        dataset_type=dataset_type,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        augmentations=augmentations,
-        **config_dict.get("data", {})
-    )
-    
-    # Create model
-    logger.info("Creating DGDM model...")
-    model_config = {
-        "node_features": node_features,
-        "hidden_dims": hidden_dims_list,
-        "num_diffusion_steps": num_diffusion_steps,
-        "attention_heads": attention_heads,
-        "dropout": dropout,
-        **config_dict.get("model", {})
-    }
-    
-    model = DGDMModel(**model_config)
-    
-    # Create trainer wrapper
-    trainer_wrapper = DGDMTrainer(
-        model=model,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay,
-        pretrain_epochs=pretrain_epochs,
-        finetune_epochs=finetune_epochs,
-        masking_ratio=masking_ratio,
-        **config_dict.get("training", {})
-    )
-    
-    # Setup callbacks
-    callbacks = []
-    
-    # Model checkpointing
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=output_path / "checkpoints",
-        filename="dgdm-{epoch:02d}-{val_loss:.2f}",
-        monitor=monitor_metric,
-        mode="min" if "loss" in monitor_metric else "max",
-        save_top_k=save_top_k,
-        save_last=True,
-        verbose=True
-    )
-    callbacks.append(checkpoint_callback)
-    
-    # Early stopping
-    early_stopping = EarlyStopping(
-        monitor=monitor_metric,
-        mode="min" if "loss" in monitor_metric else "max",
-        patience=10,
-        verbose=True
-    )
-    callbacks.append(early_stopping)
-    
-    # Learning rate monitoring
-    lr_monitor = LearningRateMonitor(logging_interval="step")
-    callbacks.append(lr_monitor)
-    
-    # Setup logger
-    if logger_type == "wandb":
-        pl_logger = WandbLogger(
-            project="dgdm-histopath",
-            name=experiment_name,
-            save_dir=output_path
-        )
-    else:
-        pl_logger = TensorBoardLogger(
-            save_dir=output_path,
-            name=experiment_name
-        )
-        
-    # Create PyTorch Lightning trainer
-    trainer = pl.Trainer(
-        max_epochs=max_epochs,
-        accelerator="gpu" if gpus > 0 else "cpu",
-        devices=gpus if gpus > 0 else "auto",
-        precision=precision,
-        callbacks=callbacks,
-        logger=pl_logger,
-        enable_checkpointing=True,
-        enable_progress_bar=True,
-        enable_model_summary=True,
-        fast_dev_run=fast_dev_run,
-        deterministic=True,
-        **config_dict.get("trainer", {})
-    )
-    
-    # Save configuration
-    final_config = {
-        "model": model_config,
-        "data": data_module.get_dataset_info(),
-        "training": {
-            "max_epochs": max_epochs,
-            "batch_size": batch_size,
-            "learning_rate": learning_rate,
-            "weight_decay": weight_decay,
-            "pretrain_epochs": pretrain_epochs,
-            "finetune_epochs": finetune_epochs,
-            "masking_ratio": masking_ratio
-        },
-        "hardware": {
-            "gpus": gpus,
-            "precision": precision
-        },
-        "experiment": {
-            "name": experiment_name,
-            "seed": seed,
-            "output_dir": str(output_path)
-        }
-    }
-    
-    save_config(final_config, output_path / "config.yaml")
-    logger.info(f"Saved configuration to {output_path / 'config.yaml'}")
-    
-    # Training
-    logger.info("Starting training...")
-    try:
-        trainer.fit(
-            trainer_wrapper, 
-            datamodule=data_module,
-            ckpt_path=resume_from_checkpoint
-        )
-        
-        # Test after training
-        if not fast_dev_run:
-            logger.info("Running final evaluation...")
-            trainer.test(datamodule=data_module)
+                data_dir=data_dir,
+                dataset_type=dataset_type,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                augmentations=augmentations,
+                **config_dict.get("data", {})
+            )
             
-        logger.info("Training completed successfully!")
-        logger.info(f"Best checkpoint: {checkpoint_callback.best_model_path}")
-        
-    except Exception as e:
-        logger.error(f"Training failed: {e}")
-        raise typer.Exit(1)
-        
-    # Save final model
-    final_model_path = output_path / "final_model.ckpt"
-    trainer.save_checkpoint(final_model_path)
-    logger.info(f"Saved final model to {final_model_path}")
+            # Create model
+            logger.info("Creating DGDM model...")
+            model_config = {
+                "node_features": node_features,
+                "hidden_dims": hidden_dims_list,
+                "num_diffusion_steps": num_diffusion_steps,
+                "attention_heads": attention_heads,
+                "dropout": dropout,
+                **config_dict.get("model", {})
+            }
+            
+            model = DGDMModel(**model_config)
+            
+            # Create trainer wrapper
+            trainer_wrapper = DGDMTrainer(
+                model=model,
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+                pretrain_epochs=pretrain_epochs,
+                finetune_epochs=finetune_epochs,
+                masking_ratio=masking_ratio,
+                **config_dict.get("training", {})
+            )
+            
+            # Setup callbacks
+            callbacks = []
+    
+            # Model checkpointing
+            checkpoint_callback = ModelCheckpoint(
+                dirpath=output_path / "checkpoints",
+                filename="dgdm-{epoch:02d}-{val_loss:.2f}",
+                monitor=monitor_metric,
+                mode="min" if "loss" in monitor_metric else "max",
+                save_top_k=save_top_k,
+                save_last=True,
+                verbose=True
+            )
+            callbacks.append(checkpoint_callback)
+    
+            # Early stopping
+            early_stopping = EarlyStopping(
+                monitor=monitor_metric,
+                mode="min" if "loss" in monitor_metric else "max",
+                patience=10,
+                verbose=True
+            )
+            callbacks.append(early_stopping)
+            
+            # Learning rate monitoring
+            lr_monitor = LearningRateMonitor(logging_interval="step")
+            callbacks.append(lr_monitor)
+    
+            # Setup logger
+            if logger_type == "wandb":
+                pl_logger = WandbLogger(
+                    project="dgdm-histopath",
+                    name=experiment_name,
+                    save_dir=output_path
+                )
+            else:
+                pl_logger = TensorBoardLogger(
+                    save_dir=output_path,
+                    name=experiment_name
+                )
+                
+            # Create PyTorch Lightning trainer
+            trainer = pl.Trainer(
+                max_epochs=max_epochs,
+                accelerator="gpu" if gpus > 0 else "cpu",
+                devices=gpus if gpus > 0 else "auto",
+                precision=precision,
+                callbacks=callbacks,
+                logger=pl_logger,
+                enable_checkpointing=True,
+                enable_progress_bar=True,
+                enable_model_summary=True,
+                fast_dev_run=fast_dev_run,
+                deterministic=True,
+                **config_dict.get("trainer", {})
+            )
+            
+            # Save configuration
+            final_config = {
+                "model": model_config,
+                "data": data_module.get_dataset_info(),
+                "training": {
+                    "max_epochs": max_epochs,
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "weight_decay": weight_decay,
+                    "pretrain_epochs": pretrain_epochs,
+                    "finetune_epochs": finetune_epochs,
+                    "masking_ratio": masking_ratio
+                },
+                "hardware": {
+                    "gpus": gpus,
+                    "precision": precision
+                },
+                "experiment": {
+                    "name": experiment_name,
+                    "seed": seed,
+                    "output_dir": str(output_path)
+                }
+            }
+            
+            save_config(final_config, output_path / "config.yaml")
+            logger.info(f"Saved configuration to {output_path / 'config.yaml'}")
+            
+            # Training
+            logger.info("Starting training...")
+            try:
+                trainer.fit(
+                    trainer_wrapper, 
+                    datamodule=data_module,
+                    ckpt_path=resume_from_checkpoint
+                )
+                
+                # Test after training
+                if not fast_dev_run:
+                    logger.info("Running final evaluation...")
+                    trainer.test(datamodule=data_module)
+                    
+                logger.info("Training completed successfully!")
+                logger.info(f"Best checkpoint: {checkpoint_callback.best_model_path}")
+                
+                # Save final model
+                final_model_path = output_path / "final_model.ckpt"
+                trainer.save_checkpoint(final_model_path)
+                logger.info(f"Saved final model to {final_model_path}")
+                
+            except Exception as e:
+                logger.error(f"Training failed: {e}")
+                raise typer.Exit(1)
+                
+        except Exception as e:
+            logger.error(f"Setup failed: {e}")
+            raise typer.Exit(1)
 
 
 @app.command()
