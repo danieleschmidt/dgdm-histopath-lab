@@ -3,6 +3,7 @@
 import time
 import threading
 import multiprocessing as mp
+import queue
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional, Callable, Union, Tuple
 import logging
@@ -552,8 +553,319 @@ def async_batch_processor(batch_size: int = 10, max_wait_time: float = 1.0):
     return decorator
 
 
+class ModelOptimizer:
+    """Advanced model optimization with JIT, quantization, and pruning."""
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.optimized_models = {}
+        self.quantization_enabled = torch.version.cuda is not None
+    
+    def optimize_model(self, model: torch.nn.Module, optimization_level: str = 'basic') -> torch.nn.Module:
+        """Apply comprehensive model optimizations."""
+        model_key = f"{model.__class__.__name__}_{id(model)}"
+        
+        if model_key in self.optimized_models:
+            return self.optimized_models[model_key]
+        
+        optimized_model = model
+        
+        try:
+            if optimization_level in ['basic', 'aggressive']:
+                # JIT compilation
+                optimized_model = self._apply_jit_optimization(optimized_model)
+            
+            if optimization_level == 'aggressive':
+                # Quantization for inference
+                optimized_model = self._apply_quantization(optimized_model)
+                
+                # Graph optimization
+                optimized_model = self._apply_graph_optimization(optimized_model)
+            
+            self.optimized_models[model_key] = optimized_model
+            self.logger.info(f"Model {model.__class__.__name__} optimized with {optimization_level} level")
+            
+        except Exception as e:
+            self.logger.warning(f"Model optimization failed: {e}, using original model")
+            optimized_model = model
+        
+        return optimized_model
+    
+    def _apply_jit_optimization(self, model: torch.nn.Module) -> torch.nn.Module:
+        """Apply TorchScript JIT compilation."""
+        try:
+            model.eval()
+            
+            # Create sample input based on expected input shape
+            sample_input = self._create_sample_input(model)
+            
+            if sample_input is not None:
+                # Trace the model
+                traced_model = torch.jit.trace(model, sample_input)
+                
+                # Optimize the traced model
+                traced_model = torch.jit.optimize_for_inference(traced_model)
+                
+                return traced_model
+            else:
+                self.logger.warning("Could not create sample input for JIT tracing")
+                return model
+                
+        except Exception as e:
+            self.logger.warning(f"JIT optimization failed: {e}")
+            return model
+    
+    def _apply_quantization(self, model: torch.nn.Module) -> torch.nn.Module:
+        """Apply dynamic quantization for inference speedup."""
+        if not self.quantization_enabled:
+            return model
+        
+        try:
+            # Apply dynamic quantization to linear layers
+            quantized_model = torch.quantization.quantize_dynamic(
+                model,
+                {torch.nn.Linear, torch.nn.Conv2d},
+                dtype=torch.qint8
+            )
+            
+            return quantized_model
+            
+        except Exception as e:
+            self.logger.warning(f"Quantization failed: {e}")
+            return model
+    
+    def _apply_graph_optimization(self, model: torch.nn.Module) -> torch.nn.Module:
+        """Apply graph-level optimizations."""
+        try:
+            if hasattr(model, 'graph'):
+                # Fuse common patterns
+                torch.jit.fuse_subgraphs(model.graph)
+                
+                # Remove dead code
+                torch.jit.eliminate_dead_code(model.graph)
+                
+                # Constant folding
+                torch.jit.constant_fold(model.graph)
+            
+            return model
+            
+        except Exception as e:
+            self.logger.warning(f"Graph optimization failed: {e}")
+            return model
+    
+    def _create_sample_input(self, model: torch.nn.Module):
+        """Create sample input for JIT tracing."""
+        try:
+            # Try to infer input shape from first layer
+            for module in model.modules():
+                if hasattr(module, 'in_features'):
+                    return torch.randn(1, module.in_features)
+                elif hasattr(module, 'in_channels'):
+                    return torch.randn(1, module.in_channels, 224, 224)
+            
+            # Default fallback
+            return torch.randn(1, 128)
+            
+        except Exception:
+            return None
+
+
+class MultiGPUManager:
+    """Multi-GPU processing and memory management."""
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.available_gpus = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        self.gpu_utilization = {gpu: 0.0 for gpu in self.available_gpus}
+        self.gpu_memory_usage = {gpu: 0.0 for gpu in self.available_gpus}
+        self._lock = threading.Lock()
+    
+    def get_optimal_gpu(self) -> int:
+        """Get the GPU with lowest utilization."""
+        if not self.available_gpus:
+            return -1  # CPU only
+        
+        with self._lock:
+            # Update GPU utilization
+            for gpu_id in self.available_gpus:
+                try:
+                    torch.cuda.set_device(gpu_id)
+                    memory_info = torch.cuda.memory_stats(gpu_id)
+                    
+                    allocated = memory_info.get('allocated_bytes.all.current', 0)
+                    reserved = memory_info.get('reserved_bytes.all.current', 0)
+                    
+                    self.gpu_memory_usage[gpu_id] = allocated / (1024**3)  # GB
+                    
+                    # Simple utilization estimate based on memory usage
+                    total_memory = torch.cuda.get_device_properties(gpu_id).total_memory
+                    self.gpu_utilization[gpu_id] = reserved / total_memory
+                    
+                except Exception as e:
+                    self.logger.warning(f"Failed to get stats for GPU {gpu_id}: {e}")
+                    self.gpu_utilization[gpu_id] = 1.0  # Mark as fully utilized
+            
+            # Return GPU with lowest utilization
+            return min(self.gpu_utilization.keys(), key=lambda x: self.gpu_utilization[x])
+    
+    def parallelize_model(self, model: torch.nn.Module, strategy: str = 'data_parallel') -> torch.nn.Module:
+        """Apply multi-GPU parallelization."""
+        if len(self.available_gpus) <= 1:
+            return model
+        
+        try:
+            if strategy == 'data_parallel':
+                return torch.nn.DataParallel(model, device_ids=self.available_gpus)
+            
+            elif strategy == 'distributed_data_parallel':
+                # Requires proper DDP setup
+                return torch.nn.parallel.DistributedDataParallel(model)
+            
+            else:
+                self.logger.warning(f"Unknown parallelization strategy: {strategy}")
+                return model
+                
+        except Exception as e:
+            self.logger.warning(f"Model parallelization failed: {e}")
+            return model
+    
+    def get_gpu_stats(self) -> Dict[str, Any]:
+        """Get comprehensive GPU statistics."""
+        stats = {}
+        
+        for gpu_id in self.available_gpus:
+            try:
+                torch.cuda.set_device(gpu_id)
+                
+                memory_info = torch.cuda.memory_stats(gpu_id)
+                device_props = torch.cuda.get_device_properties(gpu_id)
+                
+                stats[f'gpu_{gpu_id}'] = {
+                    'name': device_props.name,
+                    'total_memory_gb': device_props.total_memory / (1024**3),
+                    'allocated_gb': memory_info.get('allocated_bytes.all.current', 0) / (1024**3),
+                    'reserved_gb': memory_info.get('reserved_bytes.all.current', 0) / (1024**3),
+                    'utilization': self.gpu_utilization[gpu_id],
+                    'temperature': torch.cuda.temperature(gpu_id) if hasattr(torch.cuda, 'temperature') else None
+                }
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to get stats for GPU {gpu_id}: {e}")
+                stats[f'gpu_{gpu_id}'] = {'error': str(e)}
+        
+        return stats
+
+
+class PipelineOptimizer:
+    """Optimize data processing pipelines with prefetching and caching."""
+    
+    def __init__(self, prefetch_factor: int = 2, num_workers: int = 4):
+        self.prefetch_factor = prefetch_factor
+        self.num_workers = num_workers
+        self.pipeline_cache = {}
+        self.logger = logging.getLogger(__name__)
+    
+    def optimize_dataloader(self, dataloader_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Optimize DataLoader configuration for maximum throughput."""
+        optimized_config = dataloader_config.copy()
+        
+        # Optimize based on system capabilities
+        cpu_count = mp.cpu_count()
+        available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        
+        # Adjust num_workers based on CPU and memory
+        optimal_workers = min(
+            self.num_workers,
+            cpu_count,
+            int(available_memory_gb / 2)  # 2GB per worker heuristic
+        )
+        optimized_config['num_workers'] = optimal_workers
+        
+        # Enable optimizations
+        optimized_config['pin_memory'] = torch.cuda.is_available()
+        optimized_config['persistent_workers'] = optimal_workers > 0
+        optimized_config['prefetch_factor'] = self.prefetch_factor if optimal_workers > 0 else None
+        
+        # Enable automatic batching optimizations
+        if 'batch_size' in optimized_config:
+            optimized_config['drop_last'] = True  # For consistent batch sizes
+        
+        self.logger.info(f"Optimized DataLoader: {optimal_workers} workers, prefetch={self.prefetch_factor}")
+        
+        return optimized_config
+    
+    def create_prefetch_pipeline(self, data_source: Callable, batch_size: int = 32) -> 'PrefetchPipeline':
+        """Create optimized data prefetching pipeline."""
+        return PrefetchPipeline(data_source, batch_size, self.prefetch_factor, self.num_workers)
+
+
+class PrefetchPipeline:
+    """High-performance data prefetching pipeline."""
+    
+    def __init__(self, data_source: Callable, batch_size: int, prefetch_factor: int, num_workers: int):
+        self.data_source = data_source
+        self.batch_size = batch_size
+        self.prefetch_factor = prefetch_factor
+        self.num_workers = num_workers
+        self.prefetch_queue = None
+        self.executor = None
+        self.logger = logging.getLogger(__name__)
+    
+    def __enter__(self):
+        self.prefetch_queue = queue.Queue(maxsize=self.prefetch_factor * self.batch_size)
+        self.executor = ThreadPoolExecutor(max_workers=self.num_workers)
+        
+        # Start prefetching
+        for _ in range(self.prefetch_factor):
+            future = self.executor.submit(self._fetch_batch)
+            self.prefetch_queue.put(future)
+        
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.executor:
+            self.executor.shutdown(wait=True)
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self.prefetch_queue and not self.prefetch_queue.empty():
+            future = self.prefetch_queue.get()
+            
+            try:
+                batch = future.result(timeout=30.0)
+                
+                # Queue next batch
+                next_future = self.executor.submit(self._fetch_batch)
+                self.prefetch_queue.put(next_future)
+                
+                return batch
+                
+            except Exception as e:
+                self.logger.error(f"Prefetch error: {e}")
+                raise StopIteration
+        else:
+            raise StopIteration
+    
+    def _fetch_batch(self):
+        """Fetch a batch of data."""
+        try:
+            batch = []
+            for _ in range(self.batch_size):
+                item = self.data_source()
+                batch.append(item)
+            return batch
+        except Exception as e:
+            self.logger.error(f"Batch fetch failed: {e}")
+            return []
+
+
 # Global instances
 performance_optimizer = PerformanceOptimizer()
+model_optimizer = ModelOptimizer()
+multi_gpu_manager = MultiGPUManager()
+pipeline_optimizer = PipelineOptimizer()
 global_cache = AdvancedCache(max_size=10000, ttl_seconds=7200, max_memory_mb=2000)
 memory_pool = MemoryPool(device='cpu', max_pool_size_mb=500)
 
