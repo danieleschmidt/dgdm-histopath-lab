@@ -595,7 +595,7 @@ class QuantumDistributedManager:
             self.logger.info(f"Executing local task {task_id}: {task.function_name}")
             
             # Simulate some work
-            await asyncio.sleep(np.random.uniform(0.5, 2.0))
+            time.sleep(np.random.uniform(0.5, 2.0))
             
             # Generate mock result
             result = {
