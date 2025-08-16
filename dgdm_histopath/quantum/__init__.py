@@ -19,7 +19,7 @@ try:
     from dgdm_histopath.quantum.quantum_planner import QuantumTaskPlanner
     from dgdm_histopath.quantum.quantum_scheduler import QuantumScheduler
     from dgdm_histopath.quantum.quantum_optimizer import QuantumOptimizer
-    from dgdm_histopath.quantum.quantum_safety import QuantumSafety
+    from dgdm_histopath.quantum.quantum_safety import QuantumSafetyManager as QuantumSafety
     from dgdm_histopath.quantum.quantum_distributed import QuantumDistributedProcessor
     
     QUANTUM_COMPONENTS_AVAILABLE = True

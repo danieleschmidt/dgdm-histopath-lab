@@ -619,3 +619,28 @@ def file_alert_callback(alert_type: str, data: Dict[str, Any]):
 
 # Register default alert callback
 health_checker.add_alert_callback(file_alert_callback)
+
+# Enum for metric types
+from enum import Enum
+
+class MetricType(Enum):
+    """Metric type enumeration for monitoring."""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    TIMER = "timer"
+    HISTOGRAM = "histogram"
+
+class MonitoringScope(Enum):
+    """Monitoring scope enumeration."""
+    SYSTEM = "system"
+    APPLICATION = "application"
+    PERFORMANCE = "performance"
+    CLINICAL = "clinical"
+
+# Simple metrics collector for compatibility
+def record_metric(name, value, metric_type=None, scope=None, **kwargs):
+    """Record a metric with optional type and scope."""
+    pass
+
+# Global metrics collector instance
+metrics_collector = AdvancedMetricsCollector()

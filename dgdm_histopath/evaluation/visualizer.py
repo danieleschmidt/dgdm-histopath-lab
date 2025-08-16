@@ -20,6 +20,9 @@ try:
     PLOTLY_AVAILABLE = True
 except ImportError:
     PLOTLY_AVAILABLE = False
+    go = None  # Define as None for type hints
+    px = None
+    make_subplots = None
 
 try:
     from PIL import Image, ImageDraw
@@ -155,7 +158,7 @@ class AttentionVisualizer:
         patch_positions: Optional[np.ndarray],
         title: str,
         save_path: Optional[Union[str, Path]]
-    ) -> go.Figure:
+    ) -> Optional[Any]:
         """Create interactive plotly heatmap."""
         
         if patch_positions is not None:

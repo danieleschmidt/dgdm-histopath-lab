@@ -10,7 +10,7 @@ import threading
 import queue
 import json
 import asyncio
-from typing import Dict, List, Any, Optional, Callable, Union
+from typing import Dict, List, Any, Optional, Callable, Union, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from datetime import datetime, timedelta
@@ -812,3 +812,22 @@ if __name__ == "__main__":
     print("- System health monitoring with component tracking")
     print("- Real-time observability and diagnostics")
     print("- Thread-safe operation for production environments")
+
+# Global monitoring instance
+global_monitor = get_health_monitor()
+
+def start_monitoring():
+    """Start global monitoring."""
+    global_monitor.start_monitoring()
+
+def stop_monitoring():
+    """Stop global monitoring."""
+    global_monitor.stop_monitoring()
+
+def get_system_health():
+    """Get system health."""
+    return global_monitor.get_health_status()
+
+def record_clinical_operation(**kwargs):
+    """Record clinical operation."""
+    pass  # Placeholder implementation
