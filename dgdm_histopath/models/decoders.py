@@ -8,7 +8,7 @@ histopathology analysis tasks.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional
+from typing import List, Optional, Dict
 import numpy as np
 
 

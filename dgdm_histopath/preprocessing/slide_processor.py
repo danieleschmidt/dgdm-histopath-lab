@@ -23,6 +23,7 @@ try:
     OPENSLIDE_AVAILABLE = True
 except ImportError:
     OPENSLIDE_AVAILABLE = False
+    OpenSlide = None  # Define as None for type hints
     logging.warning("OpenSlide not available. Some WSI formats may not be supported.")
 
 from dgdm_histopath.preprocessing.tissue_detection import TissueDetector
