@@ -1,640 +1,517 @@
 """
-Intelligent auto-scaling and performance optimization for DGDM Histopath Lab.
-
-This module provides dynamic resource management, intelligent caching,
-and automated performance optimization based on workload analysis.
+Intelligent Scaling System for DGDM Histopath Lab
+Auto-scaling, load balancing, resource optimization, and distributed processing
 """
 
 import time
 import threading
-import json
-import psutil
-import sys
-from pathlib import Path
-from typing import Dict, List, Any, Optional, Callable, Tuple
-from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
-from collections import deque, defaultdict
 import concurrent.futures
+import queue
+import hashlib
+import pickle
+import json
+import logging
+from typing import Any, Dict, List, Optional, Callable, Tuple, Union
+from pathlib import Path
+from dataclasses import dataclass, field
+from enum import Enum
 from functools import wraps, lru_cache
+from contextlib import contextmanager
 import weakref
-import gc
 
+class ScalingStrategy(Enum):
+    """Auto-scaling strategies."""
+    CONSERVATIVE = "conservative"
+    BALANCED = "balanced"
+    AGGRESSIVE = "aggressive"
+    CUSTOM = "custom"
+
+class ResourceType(Enum):
+    """Types of computational resources."""
+    CPU = "cpu"
+    MEMORY = "memory"
+    GPU = "gpu"
+    DISK_IO = "disk_io"
+    NETWORK = "network"
 
 @dataclass
-class ResourceMetrics:
-    """Real-time resource utilization metrics."""
-    timestamp: datetime
-    cpu_percent: float
-    memory_percent: float
-    memory_available_gb: float
-    disk_usage_percent: float
-    gpu_utilization: Optional[float] = None
-    gpu_memory_percent: Optional[float] = None
-    active_threads: int = 0
-    queue_length: int = 0
-
-
-@dataclass
-class PerformanceProfile:
-    """Performance profile for different workload types."""
-    workload_type: str
-    avg_cpu_usage: float
-    avg_memory_usage: float
-    avg_execution_time: float
-    optimal_batch_size: int
-    recommended_workers: int
-    cache_hit_rate: float
-    throughput_per_hour: float
-
+class ResourceUsage:
+    """Resource usage metrics."""
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    gpu_percent: float = 0.0
+    disk_io_percent: float = 0.0
+    network_io_percent: float = 0.0
+    timestamp: float = field(default_factory=time.time)
+    
+    def get_bottleneck(self) -> Tuple[ResourceType, float]:
+        """Identify the primary resource bottleneck."""
+        resources = {
+            ResourceType.CPU: self.cpu_percent,
+            ResourceType.MEMORY: self.memory_percent,
+            ResourceType.GPU: self.gpu_percent,
+            ResourceType.DISK_IO: self.disk_io_percent,
+            ResourceType.NETWORK: self.network_io_percent
+        }
+        
+        bottleneck = max(resources.items(), key=lambda x: x[1])
+        return bottleneck[0], bottleneck[1]
 
 class IntelligentCache:
-    """Adaptive caching system with automatic eviction and preloading."""
+    """Intelligent caching system with LRU, size limits, and prediction."""
     
-    def __init__(self, max_size_gb: float = 2.0, ttl_hours: float = 24.0):
-        self.max_size_bytes = int(max_size_gb * 1024**3)
-        self.ttl_seconds = ttl_hours * 3600
+    def __init__(self, max_size_mb: int = 1024, ttl_seconds: int = 3600):
+        self.max_size_bytes = max_size_mb * 1024 * 1024
+        self.ttl_seconds = ttl_seconds
         self.cache = {}
         self.access_times = {}
-        self.access_counts = defaultdict(int)
-        self.size_estimates = {}
+        self.access_counts = {}
+        self.cache_size_bytes = 0
+        self.hit_count = 0
+        self.miss_count = 0
         self.lock = threading.RLock()
+        self.logger = logging.getLogger(__name__)
         
-        # Cache statistics
-        self.hits = 0
-        self.misses = 0
-        self.evictions = 0
+    def _get_cache_key(self, func_name: str, args: Tuple, kwargs: Dict) -> str:
+        """Generate cache key from function name and arguments."""
+        # Create a deterministic key
+        key_data = {
+            'func': func_name,
+            'args': args,
+            'kwargs': sorted(kwargs.items())
+        }
         
-        # Start cleanup thread
-        self.cleanup_thread = threading.Thread(target=self._cleanup_worker, daemon=True)
-        self.cleanup_thread.start()
+        # Use hash for efficiency
+        key_str = json.dumps(key_data, sort_keys=True, default=str)
+        return hashlib.md5(key_str.encode()).hexdigest()
     
-    def get(self, key: str) -> Optional[Any]:
-        """Get item from cache with automatic statistics tracking."""
+    def _evict_expired(self):
+        """Remove expired cache entries."""
+        current_time = time.time()
+        expired_keys = [
+            key for key, access_time in self.access_times.items()
+            if current_time - access_time > self.ttl_seconds
+        ]
+        
+        for key in expired_keys:
+            self._remove_key(key)
+    
+    def _evict_lru(self, target_size: int):
+        """Evict least recently used items to reach target size."""
+        if not self.access_times:
+            return
+        
+        # Sort by access time (oldest first)
+        sorted_keys = sorted(self.access_times.items(), key=lambda x: x[1])
+        
+        for key, _ in sorted_keys:
+            if self.cache_size_bytes <= target_size:
+                break
+            self._remove_key(key)
+    
+    def _remove_key(self, key: str):
+        """Remove a key from cache and update metrics."""
+        if key in self.cache:
+            # Estimate size (rough approximation)
+            try:
+                item_size = len(pickle.dumps(self.cache[key]))
+                self.cache_size_bytes -= item_size
+            except:
+                self.cache_size_bytes -= 1024  # Fallback estimate
+            
+            del self.cache[key]
+            del self.access_times[key]
+            self.access_counts.pop(key, 0)
+    
+    def get(self, func_name: str, args: Tuple, kwargs: Dict) -> Tuple[bool, Any]:
+        """Get item from cache."""
         with self.lock:
+            key = self._get_cache_key(func_name, args, kwargs)
+            
             if key in self.cache:
-                # Check TTL
+                # Check if expired
                 if time.time() - self.access_times[key] > self.ttl_seconds:
-                    self._evict_key(key)
-                    self.misses += 1
-                    return None
+                    self._remove_key(key)
+                    self.miss_count += 1
+                    return False, None
                 
                 # Update access statistics
                 self.access_times[key] = time.time()
-                self.access_counts[key] += 1
-                self.hits += 1
-                return self.cache[key]
-            
-            self.misses += 1
-            return None
+                self.access_counts[key] = self.access_counts.get(key, 0) + 1
+                self.hit_count += 1
+                
+                return True, self.cache[key]
+            else:
+                self.miss_count += 1
+                return False, None
     
-    def put(self, key: str, value: Any, size_hint: Optional[int] = None) -> bool:
-        """Put item in cache with intelligent eviction."""
+    def put(self, func_name: str, args: Tuple, kwargs: Dict, result: Any):
+        """Put item in cache."""
         with self.lock:
-            # Estimate size if not provided
-            if size_hint is None:
-                size_hint = self._estimate_size(value)
+            key = self._get_cache_key(func_name, args, kwargs)
             
-            # Check if we need to make space
-            current_size = sum(self.size_estimates.values())
-            if current_size + size_hint > self.max_size_bytes:
-                if not self._make_space(size_hint):
-                    return False  # Couldn't make enough space
+            # Estimate result size
+            try:
+                result_size = len(pickle.dumps(result))
+            except:
+                result_size = 1024  # Fallback estimate
             
-            # Store item
-            self.cache[key] = value
+            # Check if item is too large
+            if result_size > self.max_size_bytes * 0.5:
+                self.logger.warning(f"Item too large for cache: {result_size} bytes")
+                return
+            
+            # Evict expired items
+            self._evict_expired()
+            
+            # Evict LRU items if needed
+            target_size = self.max_size_bytes - result_size
+            if self.cache_size_bytes > target_size:
+                self._evict_lru(target_size)
+            
+            # Add to cache
+            self.cache[key] = result
             self.access_times[key] = time.time()
             self.access_counts[key] = 1
-            self.size_estimates[key] = size_hint
-            
-            return True
-    
-    def _estimate_size(self, obj: Any) -> int:
-        """Estimate object size in bytes."""
-        if hasattr(obj, '__sizeof__'):
-            return obj.__sizeof__()
-        elif isinstance(obj, (str, bytes)):
-            return len(obj)
-        elif isinstance(obj, (list, tuple)):
-            return sum(self._estimate_size(item) for item in obj)
-        elif isinstance(obj, dict):
-            return sum(self._estimate_size(k) + self._estimate_size(v) for k, v in obj.items())
-        else:
-            return sys.getsizeof(obj)
-    
-    def _make_space(self, needed_bytes: int) -> bool:
-        """Make space by evicting least recently used items."""
-        # Sort by access time (LRU)
-        sorted_keys = sorted(
-            self.cache.keys(),
-            key=lambda k: (self.access_times[k], self.access_counts[k])
-        )
-        
-        freed_bytes = 0
-        for key in sorted_keys:
-            if freed_bytes >= needed_bytes:
-                break
-            
-            freed_bytes += self.size_estimates[key]
-            self._evict_key(key)
-        
-        return freed_bytes >= needed_bytes
-    
-    def _evict_key(self, key: str):
-        """Evict a specific key from cache."""
-        if key in self.cache:
-            del self.cache[key]
-            del self.access_times[key]
-            del self.access_counts[key]
-            del self.size_estimates[key]
-            self.evictions += 1
-    
-    def _cleanup_worker(self):
-        """Background worker for cache cleanup."""
-        while True:
-            time.sleep(300)  # Run every 5 minutes
-            
-            with self.lock:
-                current_time = time.time()
-                expired_keys = [
-                    key for key, access_time in self.access_times.items()
-                    if current_time - access_time > self.ttl_seconds
-                ]
-                
-                for key in expired_keys:
-                    self._evict_key(key)
+            self.cache_size_bytes += result_size
     
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
+        total_requests = self.hit_count + self.miss_count
+        hit_rate = self.hit_count / total_requests if total_requests > 0 else 0
+        
+        return {
+            'hit_count': self.hit_count,
+            'miss_count': self.miss_count,
+            'hit_rate': hit_rate,
+            'cache_size_mb': self.cache_size_bytes / (1024 * 1024),
+            'item_count': len(self.cache),
+            'max_size_mb': self.max_size_bytes / (1024 * 1024)
+        }
+    
+    def clear(self):
+        """Clear all cache entries."""
         with self.lock:
-            total_requests = self.hits + self.misses
-            hit_rate = (self.hits / total_requests) * 100 if total_requests > 0 else 0
-            
-            return {
-                "hits": self.hits,
-                "misses": self.misses,
-                "hit_rate": hit_rate,
-                "evictions": self.evictions,
-                "current_size_mb": sum(self.size_estimates.values()) / (1024**2),
-                "max_size_mb": self.max_size_bytes / (1024**2),
-                "items_count": len(self.cache)
-            }
-
+            self.cache.clear()
+            self.access_times.clear()
+            self.access_counts.clear()
+            self.cache_size_bytes = 0
 
 class AdaptiveThreadPool:
-    """Thread pool that adapts size based on workload and system resources."""
+    """Thread pool that adapts size based on workload."""
     
-    def __init__(self, min_workers: int = 2, max_workers: int = 16):
+    def __init__(self, min_workers: int = 2, max_workers: int = 16, 
+                 scale_threshold: float = 0.8):
         self.min_workers = min_workers
         self.max_workers = max_workers
+        self.scale_threshold = scale_threshold
         self.current_workers = min_workers
         
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.current_workers)
-        self.pending_tasks = 0
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=min_workers)
+        self.task_queue_size = 0
         self.completed_tasks = 0
-        self.task_times = deque(maxlen=100)
+        self.failed_tasks = 0
+        self.avg_task_time = 0.0
         
         self.lock = threading.Lock()
-        self.last_resize = time.time()
-        self.resize_cooldown = 30  # seconds
+        self.logger = logging.getLogger(__name__)
         
-        # Start monitoring thread
-        self.monitor_thread = threading.Thread(target=self._monitor_worker, daemon=True)
-        self.monitor_thread.start()
+        # Scaling metrics
+        self.scaling_history = []
+        self.last_scale_time = time.time()
+        self.scale_cooldown = 30.0  # seconds
     
     def submit(self, fn: Callable, *args, **kwargs) -> concurrent.futures.Future:
-        """Submit task with automatic load tracking."""
-        with self.lock:
-            self.pending_tasks += 1
+        """Submit task with automatic scaling."""
+        start_time = time.time()
         
-        def wrapper():
-            start_time = time.time()
+        with self.lock:
+            self.task_queue_size += 1
+        
+        def wrapped_task():
             try:
                 result = fn(*args, **kwargs)
-                return result
-            finally:
-                execution_time = time.time() - start_time
                 with self.lock:
-                    self.pending_tasks -= 1
                     self.completed_tasks += 1
-                    self.task_times.append(execution_time)
+                    task_time = time.time() - start_time
+                    self._update_avg_task_time(task_time)
+                    self.task_queue_size -= 1
+                return result
+            except Exception as e:
+                with self.lock:
+                    self.failed_tasks += 1
+                    self.task_queue_size -= 1
+                raise e
         
-        return self.executor.submit(wrapper)
-    
-    def _monitor_worker(self):
-        """Monitor workload and adjust thread pool size."""
-        while True:
-            time.sleep(10)  # Check every 10 seconds
-            
-            if time.time() - self.last_resize < self.resize_cooldown:
-                continue
-            
-            with self.lock:
-                # Calculate metrics
-                if len(self.task_times) > 5:
-                    avg_task_time = sum(self.task_times) / len(self.task_times)
-                    queue_pressure = self.pending_tasks / self.current_workers
-                    
-                    # Get system metrics
-                    cpu_usage = psutil.cpu_percent(interval=1)
-                    memory_usage = psutil.virtual_memory().percent
-                    
-                    # Decide if we need to resize
-                    should_increase = (
-                        queue_pressure > 2.0 and  # High queue pressure
-                        cpu_usage < 80 and       # CPU not saturated
-                        memory_usage < 85 and    # Memory not saturated
-                        self.current_workers < self.max_workers
-                    )
-                    
-                    should_decrease = (
-                        queue_pressure < 0.5 and  # Low queue pressure
-                        avg_task_time < 1.0 and   # Fast tasks
-                        self.current_workers > self.min_workers
-                    )
-                    
-                    if should_increase:
-                        self._resize_pool(self.current_workers + 2)
-                    elif should_decrease:
-                        self._resize_pool(self.current_workers - 1)
-    
-    def _resize_pool(self, new_size: int):
-        """Resize thread pool to new size."""
-        new_size = max(self.min_workers, min(new_size, self.max_workers))
+        future = self.executor.submit(wrapped_task)
         
-        if new_size != self.current_workers:
-            old_executor = self.executor
-            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=new_size)
-            self.current_workers = new_size
-            self.last_resize = time.time()
+        # Check if scaling is needed
+        self._check_scaling()
+        
+        return future
+    
+    def _update_avg_task_time(self, task_time: float):
+        """Update average task time with exponential moving average."""
+        alpha = 0.1  # Smoothing factor
+        if self.avg_task_time == 0:
+            self.avg_task_time = task_time
+        else:
+            self.avg_task_time = alpha * task_time + (1 - alpha) * self.avg_task_time
+    
+    def _check_scaling(self):
+        """Check if scaling up or down is needed."""
+        current_time = time.time()
+        
+        # Cooldown check
+        if current_time - self.last_scale_time < self.scale_cooldown:
+            return
+        
+        with self.lock:
+            # Calculate load metrics
+            if self.current_workers > 0:
+                queue_load = self.task_queue_size / self.current_workers
+                
+                # Scale up if queue is building up
+                if (queue_load > self.scale_threshold and 
+                    self.current_workers < self.max_workers):
+                    self._scale_up()
+                
+                # Scale down if lightly loaded
+                elif (queue_load < self.scale_threshold / 3 and 
+                      self.current_workers > self.min_workers):
+                    self._scale_down()
+    
+    def _scale_up(self):
+        """Scale up worker count."""
+        new_workers = min(self.current_workers * 2, self.max_workers)
+        if new_workers > self.current_workers:
+            self.logger.info(f"Scaling up from {self.current_workers} to {new_workers} workers")
             
-            # Shutdown old executor gracefully
-            threading.Thread(target=lambda: old_executor.shutdown(wait=True), daemon=True).start()
+            # Create new executor
+            self.executor.shutdown(wait=False)
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=new_workers)
+            
+            self.current_workers = new_workers
+            self.last_scale_time = time.time()
+            
+            self.scaling_history.append({
+                'timestamp': time.time(),
+                'action': 'scale_up',
+                'workers': new_workers
+            })
+    
+    def _scale_down(self):
+        """Scale down worker count."""
+        new_workers = max(self.current_workers // 2, self.min_workers)
+        if new_workers < self.current_workers:
+            self.logger.info(f"Scaling down from {self.current_workers} to {new_workers} workers")
+            
+            # Create new executor
+            self.executor.shutdown(wait=False)
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=new_workers)
+            
+            self.current_workers = new_workers
+            self.last_scale_time = time.time()
+            
+            self.scaling_history.append({
+                'timestamp': time.time(),
+                'action': 'scale_down',
+                'workers': new_workers
+            })
     
     def get_stats(self) -> Dict[str, Any]:
         """Get thread pool statistics."""
         with self.lock:
-            avg_task_time = sum(self.task_times) / len(self.task_times) if self.task_times else 0
+            total_tasks = self.completed_tasks + self.failed_tasks
+            success_rate = self.completed_tasks / total_tasks if total_tasks > 0 else 0
             
             return {
-                "current_workers": self.current_workers,
-                "pending_tasks": self.pending_tasks,
-                "completed_tasks": self.completed_tasks,
-                "avg_task_time": avg_task_time,
-                "queue_pressure": self.pending_tasks / self.current_workers if self.current_workers > 0 else 0
+                'current_workers': self.current_workers,
+                'queue_size': self.task_queue_size,
+                'completed_tasks': self.completed_tasks,
+                'failed_tasks': self.failed_tasks,
+                'success_rate': success_rate,
+                'avg_task_time': self.avg_task_time,
+                'scaling_events': len(self.scaling_history)
             }
+    
+    def shutdown(self, wait: bool = True):
+        """Shutdown thread pool."""
+        self.executor.shutdown(wait=wait)
 
-
-class ResourceMonitor:
-    """Continuous monitoring of system resources with trend analysis."""
+class ScalableProcessor:
+    """Main scalable processing coordinator."""
     
-    def __init__(self, history_size: int = 1000):
-        self.history_size = history_size
-        self.metrics_history = deque(maxlen=history_size)
-        self.lock = threading.Lock()
-        
-        # Start monitoring thread
-        self.monitor_thread = threading.Thread(target=self._monitor_worker, daemon=True)
-        self.monitor_thread.start()
-    
-    def _monitor_worker(self):
-        """Continuous resource monitoring."""
-        while True:
-            try:
-                metrics = self._collect_metrics()
-                with self.lock:
-                    self.metrics_history.append(metrics)
-                
-                time.sleep(5)  # Collect every 5 seconds
-            except Exception:
-                time.sleep(10)  # Back off on errors
-    
-    def _collect_metrics(self) -> ResourceMetrics:
-        """Collect current resource metrics."""
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-        
-        return ResourceMetrics(
-            timestamp=datetime.now(),
-            cpu_percent=psutil.cpu_percent(interval=1),
-            memory_percent=memory.percent,
-            memory_available_gb=memory.available / (1024**3),
-            disk_usage_percent=(disk.used / disk.total) * 100,
-            active_threads=threading.active_count()
-        )
-    
-    def get_current_metrics(self) -> Optional[ResourceMetrics]:
-        """Get most recent metrics."""
-        with self.lock:
-            return self.metrics_history[-1] if self.metrics_history else None
-    
-    def get_trends(self, minutes: int = 30) -> Dict[str, Any]:
-        """Analyze resource trends over time period."""
-        cutoff_time = datetime.now() - timedelta(minutes=minutes)
-        
-        with self.lock:
-            recent_metrics = [
-                m for m in self.metrics_history 
-                if m.timestamp >= cutoff_time
-            ]
-        
-        if not recent_metrics:
-            return {}
-        
-        # Calculate trends
-        cpu_values = [m.cpu_percent for m in recent_metrics]
-        memory_values = [m.memory_percent for m in recent_metrics]
-        
-        return {
-            "period_minutes": minutes,
-            "samples": len(recent_metrics),
-            "cpu_trend": {
-                "min": min(cpu_values),
-                "max": max(cpu_values),
-                "avg": sum(cpu_values) / len(cpu_values),
-                "current": cpu_values[-1]
-            },
-            "memory_trend": {
-                "min": min(memory_values),
-                "max": max(memory_values),
-                "avg": sum(memory_values) / len(memory_values),
-                "current": memory_values[-1]
-            },
-            "alerts": self._generate_alerts(recent_metrics)
-        }
-    
-    def _generate_alerts(self, metrics: List[ResourceMetrics]) -> List[str]:
-        """Generate resource alerts."""
-        alerts = []
-        
-        if metrics:
-            latest = metrics[-1]
-            
-            if latest.cpu_percent > 90:
-                alerts.append("HIGH CPU usage detected")
-            
-            if latest.memory_percent > 90:
-                alerts.append("HIGH memory usage detected")
-            
-            if latest.disk_usage_percent > 90:
-                alerts.append("HIGH disk usage detected")
-            
-            # Check for sustained high usage
-            if len(metrics) >= 10:
-                recent_cpu = [m.cpu_percent for m in metrics[-10:]]
-                if all(cpu > 80 for cpu in recent_cpu):
-                    alerts.append("SUSTAINED high CPU usage")
-        
-        return alerts
-
-
-class IntelligentScaler:
-    """Main orchestrator for intelligent scaling and optimization."""
-    
-    def __init__(self):
+    def __init__(self, strategy: ScalingStrategy = ScalingStrategy.BALANCED):
+        self.strategy = strategy
         self.cache = IntelligentCache()
         self.thread_pool = AdaptiveThreadPool()
-        self.resource_monitor = ResourceMonitor()
+        self.logger = logging.getLogger(__name__)
         
-        self.performance_profiles = {}
-        self.optimization_history = []
+        # Performance monitoring
+        self.processing_history = []
+        self.resource_usage_history = []
         
-        # Auto-optimization settings
-        self.auto_optimize = True
-        self.optimization_interval = 300  # 5 minutes
-        
-        # Start optimization thread
-        self.optimizer_thread = threading.Thread(target=self._optimization_worker, daemon=True)
-        self.optimizer_thread.start()
+        # Configuration based on strategy
+        self._configure_strategy()
     
-    def cached_operation(self, cache_key: str, ttl_hours: float = 24.0):
-        """Decorator for caching expensive operations."""
-        def decorator(func: Callable) -> Callable:
+    def _configure_strategy(self):
+        """Configure processing based on scaling strategy."""
+        if self.strategy == ScalingStrategy.CONSERVATIVE:
+            self.thread_pool.max_workers = 8
+            self.cache.max_size_bytes = 512 * 1024 * 1024  # 512MB
+        elif self.strategy == ScalingStrategy.AGGRESSIVE:
+            self.thread_pool.max_workers = 32
+            self.cache.max_size_bytes = 2048 * 1024 * 1024  # 2GB
+        else:  # BALANCED
+            self.thread_pool.max_workers = 16
+            self.cache.max_size_bytes = 1024 * 1024 * 1024  # 1GB
+    
+    def cached_execution(self, cache_key: str = None, ttl: int = None):
+        """Decorator for cached function execution."""
+        def decorator(func):
             @wraps(func)
             def wrapper(*args, **kwargs):
-                # Try cache first
-                cached_result = self.cache.get(cache_key)
-                if cached_result is not None:
-                    return cached_result
-                
-                # Execute function
-                result = func(*args, **kwargs)
-                
-                # Cache result
-                self.cache.put(cache_key, result)
-                
-                return result
-            return wrapper
-        return decorator
-    
-    def optimized_processing(self, workload_type: str = "default"):
-        """Decorator for optimized processing with resource management."""
-        def decorator(func: Callable) -> Callable:
-            @wraps(func)
-            def wrapper(*args, **kwargs):
-                start_time = time.time()
-                
-                # Get current metrics
-                metrics = self.resource_monitor.get_current_metrics()
-                
-                # Execute with resource monitoring
-                try:
-                    result = func(*args, **kwargs)
-                    execution_time = time.time() - start_time
-                    
-                    # Update performance profile
-                    self._update_performance_profile(workload_type, metrics, execution_time, True)
-                    
+                # Check cache first
+                hit, result = self.cache.get(func.__name__, args, kwargs)
+                if hit:
+                    self.logger.debug(f"Cache hit for {func.__name__}")
                     return result
                 
+                # Execute function
+                start_time = time.time()
+                try:
+                    result = func(*args, **kwargs)
+                    duration = time.time() - start_time
+                    
+                    # Cache result
+                    self.cache.put(func.__name__, args, kwargs, result)
+                    
+                    # Record performance
+                    self.processing_history.append({
+                        'function': func.__name__,
+                        'duration': duration,
+                        'timestamp': time.time(),
+                        'cache_hit': False
+                    })
+                    
+                    return result
+                    
                 except Exception as e:
-                    execution_time = time.time() - start_time
-                    self._update_performance_profile(workload_type, metrics, execution_time, False)
-                    raise e
+                    self.logger.error(f"Error in {func.__name__}: {e}")
+                    raise
             
             return wrapper
         return decorator
     
-    def _update_performance_profile(self, workload_type: str, metrics: Optional[ResourceMetrics], 
-                                  execution_time: float, success: bool):
-        """Update performance profile for workload type."""
-        if workload_type not in self.performance_profiles:
-            self.performance_profiles[workload_type] = {
-                "samples": 0,
-                "total_cpu": 0,
-                "total_memory": 0,
-                "total_time": 0,
-                "success_count": 0
-            }
-        
-        profile = self.performance_profiles[workload_type]
-        profile["samples"] += 1
-        profile["total_time"] += execution_time
-        
-        if metrics:
-            profile["total_cpu"] += metrics.cpu_percent
-            profile["total_memory"] += metrics.memory_percent
-        
-        if success:
-            profile["success_count"] += 1
-    
-    def _optimization_worker(self):
-        """Background worker for continuous optimization."""
-        while True:
-            time.sleep(self.optimization_interval)
-            
-            if self.auto_optimize:
-                try:
-                    self._run_optimizations()
-                except Exception:
-                    pass  # Don't let optimization failures crash the system
-    
-    def _run_optimizations(self):
-        """Run optimization analysis and adjustments."""
-        # Analyze cache performance
-        cache_stats = self.cache.get_stats()
-        if cache_stats["hit_rate"] < 50:  # Low hit rate
-            # Could suggest cache size adjustment or TTL changes
-            pass
-        
-        # Analyze thread pool performance
-        pool_stats = self.thread_pool.get_stats()
-        
-        # Analyze resource trends
-        trends = self.resource_monitor.get_trends()
-        
-        # Record optimization event
-        optimization_event = {
-            "timestamp": datetime.now().isoformat(),
-            "cache_stats": cache_stats,
-            "pool_stats": pool_stats,
-            "resource_trends": trends,
-            "performance_profiles": self._get_performance_summary()
-        }
-        
-        self.optimization_history.append(optimization_event)
-        
-        # Keep only last 100 optimization events
-        if len(self.optimization_history) > 100:
-            self.optimization_history.pop(0)
-    
-    def _get_performance_summary(self) -> Dict[str, Any]:
-        """Get summary of performance profiles."""
-        summary = {}
-        
-        for workload_type, profile in self.performance_profiles.items():
-            if profile["samples"] > 0:
-                summary[workload_type] = {
-                    "avg_cpu": profile["total_cpu"] / profile["samples"],
-                    "avg_memory": profile["total_memory"] / profile["samples"],
-                    "avg_execution_time": profile["total_time"] / profile["samples"],
-                    "success_rate": (profile["success_count"] / profile["samples"]) * 100,
-                    "samples": profile["samples"]
-                }
-        
-        return summary
-    
-    def get_scaling_report(self) -> Dict[str, Any]:
-        """Generate comprehensive scaling and performance report."""
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "cache_performance": self.cache.get_stats(),
-            "thread_pool_performance": self.thread_pool.get_stats(),
-            "current_resources": asdict(self.resource_monitor.get_current_metrics()) if self.resource_monitor.get_current_metrics() else {},
-            "resource_trends": self.resource_monitor.get_trends(),
-            "performance_profiles": self._get_performance_summary(),
-            "optimization_events": len(self.optimization_history),
-            "scaling_recommendations": self._generate_scaling_recommendations()
-        }
-    
-    def _generate_scaling_recommendations(self) -> List[str]:
-        """Generate scaling recommendations based on analysis."""
-        recommendations = []
-        
-        # Cache recommendations
-        cache_stats = self.cache.get_stats()
-        if cache_stats["hit_rate"] < 30:
-            recommendations.append("Cache hit rate is low. Consider increasing cache size or adjusting TTL.")
-        
-        # Resource recommendations
-        trends = self.resource_monitor.get_trends()
-        if trends.get("cpu_trend", {}).get("avg", 0) > 80:
-            recommendations.append("High average CPU usage. Consider scaling horizontally.")
-        
-        if trends.get("memory_trend", {}).get("avg", 0) > 80:
-            recommendations.append("High memory usage. Consider optimizing memory usage or adding RAM.")
-        
-        # Thread pool recommendations
-        pool_stats = self.thread_pool.get_stats()
-        if pool_stats["queue_pressure"] > 3:
-            recommendations.append("High queue pressure. Consider increasing max workers.")
-        
-        return recommendations
-    
-    def force_garbage_collection(self):
-        """Force garbage collection and memory optimization."""
-        # Clear weak references
-        gc.collect()
-        
-        # Force cache cleanup if memory is high
-        memory_usage = psutil.virtual_memory().percent
-        if memory_usage > 85:
-            with self.cache.lock:
-                # Aggressively evict old cache entries
-                current_time = time.time()
-                old_keys = [
-                    key for key, access_time in self.cache.access_times.items()
-                    if current_time - access_time > 3600  # 1 hour
-                ]
+    def parallel_execution(self, max_workers: int = None):
+        """Decorator for parallel function execution."""
+        def decorator(func):
+            @wraps(func)
+            def wrapper(items: List[Any], *args, **kwargs):
+                if not items:
+                    return []
                 
-                for key in old_keys[:len(old_keys)//2]:  # Evict half of old entries
-                    self.cache._evict_key(key)
+                # Use adaptive thread pool
+                futures = []
+                for item in items:
+                    future = self.thread_pool.submit(func, item, *args, **kwargs)
+                    futures.append(future)
+                
+                # Collect results
+                results = []
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        result = future.result()
+                        results.append(result)
+                    except Exception as e:
+                        self.logger.error(f"Parallel execution error: {e}")
+                        results.append(None)
+                
+                return results
+            
+            return wrapper
+        return decorator
+    
+    def get_performance_report(self) -> Dict[str, Any]:
+        """Get comprehensive performance report."""
+        return {
+            'cache_stats': self.cache.get_stats(),
+            'thread_pool_stats': self.thread_pool.get_stats(),
+            'processing_history_count': len(self.processing_history),
+            'strategy': self.strategy.value
+        }
+    
+    def optimize_configuration(self):
+        """Automatically optimize configuration based on usage patterns."""
+        stats = self.get_performance_report()
+        
+        # Optimize cache size based on hit rate
+        cache_hit_rate = stats['cache_stats']['hit_rate']
+        if cache_hit_rate < 0.5:
+            # Increase cache size
+            self.cache.max_size_bytes = int(self.cache.max_size_bytes * 1.5)
+            self.logger.info("Increased cache size due to low hit rate")
+        
+        # Optimize thread pool based on queue size
+        queue_size = stats['thread_pool_stats']['queue_size']
+        current_workers = stats['thread_pool_stats']['current_workers']
+        
+        if queue_size > current_workers * 2:
+            self.thread_pool.max_workers = min(self.thread_pool.max_workers + 4, 64)
+            self.logger.info("Increased max workers due to high queue size")
+    
+    def shutdown(self):
+        """Shutdown all components."""
+        self.thread_pool.shutdown()
+        self.cache.clear()
 
+# Global scalable processor instance
+global_processor = ScalableProcessor()
 
-# Global scaler instance
-intelligent_scaler = IntelligentScaler()
-
+def get_scalable_processor() -> ScalableProcessor:
+    """Get global scalable processor instance."""
+    return global_processor
 
 # Convenience decorators
-def cached(cache_key: str, ttl_hours: float = 24.0):
+def cached(ttl: int = 3600):
     """Convenience decorator for caching."""
-    return intelligent_scaler.cached_operation(cache_key, ttl_hours)
+    return global_processor.cached_execution(ttl=ttl)
 
-
-def optimized(workload_type: str = "default"):
-    """Convenience decorator for optimization."""
-    return intelligent_scaler.optimized_processing(workload_type)
-
+def parallel(max_workers: int = None):
+    """Convenience decorator for parallel execution."""
+    return global_processor.parallel_execution(max_workers=max_workers)
 
 if __name__ == "__main__":
-    # Generate scaling report
-    report = intelligent_scaler.get_scaling_report()
+    # Test scaling system
+    processor = get_scalable_processor()
     
-    print("=" * 80)
-    print("INTELLIGENT SCALING REPORT")
-    print("=" * 80)
+    @cached(ttl=60)
+    def expensive_computation(n: int) -> int:
+        """Simulate expensive computation."""
+        time.sleep(0.1)
+        return n * n
     
-    print("Cache Performance:")
-    cache_stats = report["cache_performance"]
-    print(f"  Hit Rate: {cache_stats['hit_rate']:.1f}%")
-    print(f"  Items: {cache_stats['items_count']}")
-    print(f"  Size: {cache_stats['current_size_mb']:.1f}MB / {cache_stats['max_size_mb']:.1f}MB")
+    @parallel()
+    def process_item(item: int) -> int:
+        """Process single item."""
+        return expensive_computation(item)
     
-    print("\nThread Pool Performance:")
-    pool_stats = report["thread_pool_performance"]
-    print(f"  Workers: {pool_stats['current_workers']}")
-    print(f"  Queue Pressure: {pool_stats['queue_pressure']:.2f}")
-    print(f"  Avg Task Time: {pool_stats['avg_task_time']:.3f}s")
+    # Test caching
+    print("Testing caching...")
+    for i in range(5):
+        result = expensive_computation(42)
+        print(f"Result: {result}")
     
-    print("\nCurrent Resources:")
-    resources = report["current_resources"]
-    if resources:
-        print(f"  CPU: {resources['cpu_percent']:.1f}%")
-        print(f"  Memory: {resources['memory_percent']:.1f}%")
-        print(f"  Available Memory: {resources['memory_available_gb']:.1f}GB")
+    # Test parallel processing
+    print("\nTesting parallel processing...")
+    items = list(range(10))
+    results = process_item(items)
+    print(f"Processed {len(results)} items")
     
-    print("\nRecommendations:")
-    for rec in report["scaling_recommendations"]:
-        print(f"  • {rec}")
+    # Get performance report
+    report = processor.get_performance_report()
+    print("\nPerformance Report:")
+    print(json.dumps(report, indent=2))
     
-    print("=" * 80)
+    processor.shutdown()

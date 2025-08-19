@@ -1,0 +1,115 @@
+{
+  "deployment_id": "dgdm_deployment_1755646536",
+  "timestamp": 1755646536.4326932,
+  "overall_success": false,
+  "total_duration": 0.08034062385559082,
+  "stages_completed": 2,
+  "deployment_results": [
+    {
+      "stage": "preparation",
+      "status": "success",
+      "duration": 0.0003376007080078125,
+      "message": "Environment preparation completed",
+      "details": {
+        "checks": [
+          {
+            "check": "Python version",
+            "status": "\u2705",
+            "details": "3.12"
+          },
+          {
+            "check": "Directory dgdm_histopath",
+            "status": "\u2705",
+            "details": "Present"
+          },
+          {
+            "check": "Directory configs",
+            "status": "\u2705",
+            "details": "Present"
+          },
+          {
+            "check": "Directory deployment",
+            "status": "\u2705",
+            "details": "Present"
+          },
+          {
+            "check": "File pyproject.toml",
+            "status": "\u2705",
+            "details": "Present"
+          },
+          {
+            "check": "File requirements.txt",
+            "status": "\u2705",
+            "details": "Present"
+          },
+          {
+            "check": "File README.md",
+            "status": "\u2705",
+            "details": "Present"
+          },
+          {
+            "check": "Create logs",
+            "status": "\u2705",
+            "details": "Created"
+          },
+          {
+            "check": "Create data",
+            "status": "\u2705",
+            "details": "Created"
+          },
+          {
+            "check": "Create checkpoints",
+            "status": "\u2705",
+            "details": "Created"
+          },
+          {
+            "check": "Create results",
+            "status": "\u2705",
+            "details": "Created"
+          }
+        ]
+      },
+      "timestamp": 1755646536.3523567
+    },
+    {
+      "stage": "validation",
+      "status": "failed",
+      "duration": 0.08000302314758301,
+      "message": "Validation failed",
+      "details": {
+        "validations": [
+          {
+            "validation": "Package import",
+            "status": "\u2705",
+            "details": "Version 0.1.0"
+          },
+          {
+            "validation": "Quality gates",
+            "status": "\u274c",
+            "details": "Quality gates failed"
+          },
+          {
+            "validation": "Config configs/dgdm_base.yaml",
+            "status": "\u2705",
+            "details": "Valid"
+          },
+          {
+            "validation": "Config deployment/production_config.yaml",
+            "status": "\u2705",
+            "details": "Valid"
+          }
+        ]
+      },
+      "timestamp": 1755646536.4325657
+    }
+  ],
+  "summary": {
+    "preparation": true,
+    "validation": false,
+    "build": false,
+    "test": false,
+    "staging": false,
+    "production": false,
+    "monitoring": false
+  }
+}
