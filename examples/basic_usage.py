@@ -3,25 +3,49 @@
 Basic usage example for DGDM Histopath Lab.
 
 This example demonstrates how to:
-1. Load and preprocess a whole-slide image
+1. Load and preprocess a whole-slide image (or use synthetic data)
 2. Build a tissue graph representation
-3. Train a DGDM model
-4. Make predictions and visualize results
+3. Initialize a DGDM model
+4. Run basic training steps
+5. Make predictions and visualize results
+
+Includes fallback modes for environments without full dependencies.
 """
 
-import logging
+import sys
 from pathlib import Path
-import torch
-import numpy as np
 
-# Import DGDM components
-from dgdm_histopath.preprocessing.slide_processor import SlideProcessor
-from dgdm_histopath.preprocessing.tissue_graph_builder import TissueGraphBuilder
-from dgdm_histopath.models.dgdm_model import DGDMModel
-from dgdm_histopath.training.trainer import DGDMTrainer
-from dgdm_histopath.evaluation.predictor import DGDMPredictor
-from dgdm_histopath.evaluation.visualizer import AttentionVisualizer
-from dgdm_histopath.utils.logging import setup_logging
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+
+def safe_import_check():
+    """Check available dependencies and return capability flags."""
+    capabilities = {
+        'torch': False,
+        'numpy': False,
+        'logging': True,
+        'dgdm_core': False
+    }
+    
+    try:
+        import torch
+        capabilities['torch'] = True
+    except ImportError:
+        print("⚠️ PyTorch not available")
+    
+    try:
+        import numpy as np
+        capabilities['numpy'] = True
+    except ImportError:
+        print("⚠️ NumPy not available")
+    
+    try:
+        from dgdm_histopath.models.dgdm_model import DGDMModel
+        capabilities['dgdm_core'] = True
+    except ImportError:
+        print("⚠️ DGDM core models not fully available")
+    
+    return capabilities
 
 
 def main():
