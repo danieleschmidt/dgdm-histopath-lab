@@ -1,6 +1,11 @@
 """Enhanced configuration utilities with validation and security."""
 
-import yaml
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+
 import json
 import os
 import hashlib
@@ -116,9 +121,11 @@ def load_config(
         # Load configuration
         with open(config_path, 'r', encoding='utf-8') as f:
             if config_path.suffix.lower() in ['.yaml', '.yml']:
+                if not YAML_AVAILABLE:
+                    raise ConfigurationError(f"PyYAML not available but trying to load YAML file: {config_path}")
                 try:
                     config = yaml.safe_load(f)
-                except yaml.YAMLError as e:
+                except Exception as e:
                     raise ConfigurationError(f"Invalid YAML format: {e}")
             elif config_path.suffix.lower() == '.json':
                 try:
