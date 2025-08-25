@@ -13,6 +13,26 @@ from pathlib import Path
 import json
 import logging
 
+class RobustEnvironment:
+    """Robust environment management with fallback capabilities."""
+    
+    def __init__(self):
+        self.validator = EnvironmentValidator()
+        self.capabilities = {}
+        self.fallback_strategies = {}
+        
+    def check_capabilities(self):
+        """Check all system capabilities."""
+        return self.validator.validate_complete_environment()
+        
+    def get_fallback_strategy(self, capability):
+        """Get fallback strategy for missing capability."""
+        return self.fallback_strategies.get(capability, lambda: None)
+        
+    def register_fallback(self, capability: str, fallback_fn):
+        """Register fallback strategy for capability."""
+        self.fallback_strategies[capability] = fallback_fn
+
 class EnvironmentValidator:
     """Validates and manages environment dependencies robustly."""
     

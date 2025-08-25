@@ -37,8 +37,8 @@ class QualityGateResult:
 class AutonomousQualityGates:
     """Comprehensive autonomous quality gate system."""
     
-    def __init__(self, project_root: Path):
-        self.project_root = Path(project_root)
+    def __init__(self, project_root: str = None):
+        self.project_root = Path(project_root) if project_root else Path.cwd()
         self.results = []
         self.overall_score = 0.0
         self.start_time = time.time()

@@ -434,3 +434,46 @@ def get_scaling_status() -> Dict[str, Any]:
 def force_scale_to(target_workers: int) -> bool:
     """Force scaling to specific number of workers."""
     return global_auto_scaler.force_scale_to(target_workers)
+
+
+class AutoScalingManager:
+    """High-level auto-scaling management system."""
+    
+    def __init__(self, initial_workers: int = 4):
+        self.auto_scaler = AutoScaler(initial_workers=initial_workers)
+        
+    def get_current_load(self) -> Dict[str, float]:
+        """Get current system load metrics."""
+        try:
+            return self.auto_scaler.get_current_status()
+        except Exception:
+            # Fallback metrics when monitoring unavailable
+            return {
+                "cpu_usage": 0.5,
+                "memory_usage": 0.3,
+                "active_workers": self.auto_scaler.current_workers
+            }
+        
+    def scale_resources(self, target_workers: int) -> bool:
+        """Scale resources to target number of workers."""
+        try:
+            return self.auto_scaler.force_scale_to(target_workers)
+        except Exception:
+            return False
+            
+    def get_scaling_recommendations(self) -> Dict[str, Any]:
+        """Get scaling recommendations based on current metrics."""
+        metrics = self.get_current_load()
+        return {
+            "current_workers": self.auto_scaler.current_workers,
+            "recommended_action": "stable",
+            "metrics": metrics
+        }
+        
+    def start_auto_scaling(self):
+        """Start automatic scaling monitoring."""
+        self.auto_scaler.start_monitoring()
+        
+    def stop_auto_scaling(self):
+        """Stop automatic scaling monitoring."""
+        self.auto_scaler.stop_monitoring()

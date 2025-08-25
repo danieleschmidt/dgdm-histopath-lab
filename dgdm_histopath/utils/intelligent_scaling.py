@@ -60,8 +60,8 @@ class ResourceUsage:
 class IntelligentCache:
     """Intelligent caching system with LRU, size limits, and prediction."""
     
-    def __init__(self, max_size_mb: int = 1024, ttl_seconds: int = 3600):
-        self.max_size_bytes = max_size_mb * 1024 * 1024
+    def __init__(self, max_size_mb: int = 1024, ttl_seconds: int = 3600, max_size: int = None):
+        self.max_size_bytes = (max_size if max_size is not None else max_size_mb) * 1024 * 1024
         self.ttl_seconds = ttl_seconds
         self.cache = {}
         self.access_times = {}
@@ -71,6 +71,36 @@ class IntelligentCache:
         self.miss_count = 0
         self.lock = threading.RLock()
         self.logger = logging.getLogger(__name__)
+        
+    def set(self, key: str, value: Any) -> None:
+        """Set a value in the cache."""
+        with self.lock:
+            if key in self.cache:
+                self.cache_size_bytes -= self._get_size(self.cache[key])
+            
+            self.cache[key] = value
+            self.access_times[key] = time.time()
+            self.access_counts[key] = self.access_counts.get(key, 0) + 1
+            self.cache_size_bytes += self._get_size(value)
+            
+    def get(self, key: str) -> Any:
+        """Get a value from the cache."""
+        with self.lock:
+            if key in self.cache:
+                self.access_times[key] = time.time()
+                self.access_counts[key] += 1
+                self.hit_count += 1
+                return self.cache[key]
+            else:
+                self.miss_count += 1
+                return None
+                
+    def _get_size(self, obj: Any) -> int:
+        """Estimate object size in bytes."""
+        try:
+            return len(str(obj))  # Simple estimation
+        except:
+            return 64  # Default size
         
     def _get_cache_key(self, func_name: str, args: Tuple, kwargs: Dict) -> str:
         """Generate cache key from function name and arguments."""
