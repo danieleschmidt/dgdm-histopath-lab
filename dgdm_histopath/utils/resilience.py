@@ -549,9 +549,57 @@ def with_bulkhead(max_concurrent: int = 10):
     return decorator
 
 
+class ResilienceManager:
+    """Manages overall system resilience and fault tolerance."""
+    
+    def __init__(self):
+        self.circuit_breakers = {}
+        self.health_checks = {}
+        self.recovery_strategies = {}
+        self.failure_counters = {}
+        self.health_monitor = HealthMonitor()
+        
+    def register_circuit_breaker(self, name: str, threshold: int = 5, timeout: int = 60):
+        """Register a circuit breaker for a service."""
+        config = CircuitBreakerConfig(failure_threshold=threshold, recovery_timeout=timeout)
+        self.circuit_breakers[name] = CircuitBreaker(name, config)
+        
+    def register_health_check(self, name: str, check_fn):
+        """Register a health check function."""
+        self.health_checks[name] = check_fn
+        self.health_monitor.register_health_check(name, check_fn)
+        
+    def check_system_health(self):
+        """Check overall system health."""
+        health_status = {}
+        for name, check_fn in self.health_checks.items():
+            try:
+                health_status[name] = check_fn()
+            except Exception as e:
+                health_status[name] = f"Failed: {e}"
+        return health_status
+        
+    def get_resilience_metrics(self):
+        """Get current resilience metrics."""
+        return {
+            'circuit_breakers': {name: cb.get_stats() for name, cb in self.circuit_breakers.items()},
+            'failure_counters': self.failure_counters.copy(),
+            'health_status': self.check_system_health()
+        }
+    
+    def start_monitoring(self):
+        """Start health monitoring."""
+        self.health_monitor.start_monitoring()
+    
+    def stop_monitoring(self):
+        """Stop health monitoring."""
+        self.health_monitor.stop_monitoring()
+
+
 # Global instances
 default_circuit_breaker = CircuitBreaker("default")
 default_health_monitor = HealthMonitor()
+resilience_manager = ResilienceManager()
 
 # Start health monitoring by default
 default_health_monitor.start_monitoring()

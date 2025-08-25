@@ -222,11 +222,62 @@ class GracefulDegradation:
                 raise e
 
 
+class EnhancedErrorHandler:
+    """Enhanced error handling with comprehensive logging and recovery."""
+    
+    def __init__(self, logger=None):
+        self.logger = logger or resilient_logger
+        self.error_counts = {}
+        self.recovery_strategies = {}
+        self.circuit_breaker = CircuitBreaker()
+        
+    def handle_error(self, error, context=None, recovery_fn=None):
+        """Handle errors with automatic recovery and logging."""
+        error_type = type(error).__name__
+        self.error_counts[error_type] = self.error_counts.get(error_type, 0) + 1
+        
+        error_info = ErrorInfo(
+            timestamp=datetime.now(),
+            error_type=error_type,
+            error_message=str(error),
+            severity=ErrorSeverity.MEDIUM,
+            traceback=traceback.format_exc(),
+            context=context or {}
+        )
+        
+        self.logger.log_error(error_info)
+            
+        if recovery_fn:
+            try:
+                return recovery_fn()
+            except Exception as recovery_error:
+                recovery_info = ErrorInfo(
+                    timestamp=datetime.now(),
+                    error_type=type(recovery_error).__name__,
+                    error_message=f"Recovery failed: {recovery_error}",
+                    severity=ErrorSeverity.HIGH,
+                    traceback=traceback.format_exc(),
+                    context={"original_error": str(error), "context": context}
+                )
+                self.logger.log_error(recovery_info)
+                    
+        return None
+        
+    def get_error_stats(self):
+        """Get error statistics."""
+        return self.error_counts.copy()
+
+    def register_recovery_strategy(self, error_type: str, strategy: Callable):
+        """Register a recovery strategy for specific error types."""
+        self.recovery_strategies[error_type] = strategy
+
+
 # Global instances
 resilient_logger = ResilientLogger()
 global_circuit_breaker = CircuitBreaker()
 default_retry = RetryStrategy()
 degradation_manager = GracefulDegradation()
+enhanced_error_handler = EnhancedErrorHandler()
 
 
 def resilient(max_retries: int = 3, circuit_breaker: bool = True, 
