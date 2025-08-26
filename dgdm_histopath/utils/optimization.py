@@ -23,8 +23,17 @@ from functools import wraps, lru_cache
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 import queue
-import psutil
-import numpy as np
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
 from collections import defaultdict, OrderedDict
 import json
 
@@ -35,10 +44,29 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-from dgdm_histopath.utils.exceptions import (
-    PerformanceError, ResourceError, global_exception_handler
-)
-from dgdm_histopath.utils.monitoring import metrics_collector
+try:
+    from dgdm_histopath.utils.exceptions import (
+        PerformanceError, ResourceError, global_exception_handler
+    )
+    from dgdm_histopath.utils.monitoring import metrics_collector
+    DGDM_UTILS_AVAILABLE = True
+except ImportError:
+    DGDM_UTILS_AVAILABLE = False
+    
+    # Fallback exception classes
+    class PerformanceError(Exception):
+        pass
+    
+    class ResourceError(Exception):
+        pass
+    
+    def global_exception_handler(func):
+        return func
+    
+    class metrics_collector:
+        @staticmethod
+        def record_metric(name, value, tags=None):
+            pass
 
 T = TypeVar('T')
 
@@ -710,6 +738,46 @@ class ParallelProcessor:
                 'average_throughput': avg_throughput,
                 'adaptive_scaling': self.adaptive_scaling
             }
+
+
+class OptimizationEngine:
+    """Main optimization engine that coordinates all optimization components."""
+    
+    def __init__(self):
+        self.memory_optimizer = MemoryOptimizer()
+        self.cache = AdaptiveCache()
+        self.parallel_processor = ParallelProcessor()
+        self.logger = logging.getLogger(__name__)
+        
+    def optimize_all(self):
+        """Run all optimizations."""
+        results = []
+        
+        try:
+            # Memory optimization
+            memory_result = self.memory_optimizer.optimize()
+            results.append(('memory', memory_result))
+        except Exception as e:
+            self.logger.error(f"Memory optimization failed: {e}")
+            results.append(('memory', False))
+        
+        try:
+            # Cache optimization
+            cache_stats = self.cache.get_stats()
+            results.append(('cache', cache_stats))
+        except Exception as e:
+            self.logger.error(f"Cache optimization failed: {e}")
+            results.append(('cache', False))
+        
+        return results
+    
+    def get_status(self):
+        """Get optimization engine status."""
+        return {
+            'memory_optimizer': hasattr(self, 'memory_optimizer'),
+            'cache': hasattr(self, 'cache'),
+            'parallel_processor': hasattr(self, 'parallel_processor')
+        }
 
 
 class MemoryOptimizer:

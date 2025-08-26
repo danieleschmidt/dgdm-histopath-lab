@@ -20,7 +20,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from pathlib import Path
-import psutil
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logging.warning("psutil not available - using fallback resource monitoring")
 
 try:
     import torch
@@ -37,10 +42,36 @@ try:
 except ImportError:
     RAY_AVAILABLE = False
 
-from dgdm_histopath.utils.exceptions import (
-    ResourceError, PerformanceError, global_exception_handler
-)
-from dgdm_histopath.utils.monitoring import metrics_collector
+try:
+    from dgdm_histopath.utils.exceptions import (
+        ResourceError, PerformanceError, global_exception_handler
+    )
+    from dgdm_histopath.utils.monitoring import metrics_collector
+    DGDM_UTILS_AVAILABLE = True
+except ImportError:
+    DGDM_UTILS_AVAILABLE = False
+    
+    # Fallback exception classes
+    class ResourceError(Exception):
+        pass
+    
+    class PerformanceError(Exception):
+        pass
+    
+    def global_exception_handler(func):
+        return func
+    
+    class metrics_collector:
+        @staticmethod
+        def record_metric(name, value, tags=None):
+            pass
+
+# Import lite processing as fallback
+try:
+    from .distributed_processing_lite import DistributedManager as LiteDistributedManager
+    LITE_PROCESSING_AVAILABLE = True
+except ImportError:
+    LITE_PROCESSING_AVAILABLE = False
 
 
 @dataclass
@@ -1004,3 +1035,24 @@ def shutdown_distributed_processing():
 
 # Global orchestrator for compatibility
 global_orchestrator = None
+
+# Provide DistributedManager for backward compatibility
+if LITE_PROCESSING_AVAILABLE:
+    # Use lightweight implementation when available
+    DistributedManager = LiteDistributedManager
+else:
+    # Fallback manager
+    class DistributedManager:
+        def __init__(self, num_workers=4):
+            self.num_workers = num_workers
+            self.logger = logging.getLogger(__name__)
+            
+        def get_current_load(self):
+            """Get fallback load metrics."""
+            return {"cpu_usage": 0.0, "memory_usage": 0.0, "active_workers": self.num_workers}
+        
+        def start(self):
+            self.logger.info("Fallback distributed manager started")
+        
+        def stop(self):
+            self.logger.info("Fallback distributed manager stopped")
