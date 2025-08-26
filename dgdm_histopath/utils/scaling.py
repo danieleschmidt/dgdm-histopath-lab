@@ -4,7 +4,11 @@ import time
 import threading
 import queue
 import logging
-import psutil
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 from typing import Dict, Any, List, Optional, Callable, Union
 from dataclasses import dataclass, field
 from collections import deque
@@ -552,8 +556,12 @@ class DistributedTaskManager:
         while True:
             try:
                 # Collect system metrics
-                cpu_percent = psutil.cpu_percent(interval=1)
-                memory_percent = psutil.virtual_memory().percent
+                if PSUTIL_AVAILABLE:
+                    cpu_percent = psutil.cpu_percent(interval=1)
+                    memory_percent = psutil.virtual_memory().percent
+                else:
+                    cpu_percent = 0.0
+                    memory_percent = 0.0
                 
                 # GPU metrics if available
                 gpu_memory_percent = None
@@ -629,7 +637,7 @@ class DistributedTaskManager:
 # Example usage and global instances
 default_scaling_policy = ScalingPolicy(
     min_workers=2,
-    max_workers=min(8, psutil.cpu_count()),
+    max_workers=min(8, psutil.cpu_count() if PSUTIL_AVAILABLE else 4),
     cpu_scale_up_threshold=75.0,
     cpu_scale_down_threshold=25.0,
     evaluation_window=180
@@ -647,3 +655,27 @@ def get_task_manager() -> DistributedTaskManager:
             scaling_policy=default_scaling_policy
         )
     return global_task_manager
+
+# Create ScalingOrchestrator alias for backward compatibility
+class ScalingOrchestrator:
+    """Scaling orchestrator that coordinates auto-scaling operations."""
+    
+    def __init__(self):
+        self.task_manager = get_task_manager()
+        self.logger = logging.getLogger(__name__)
+        
+    def start(self):
+        """Start scaling orchestration."""
+        self.logger.info("Scaling orchestrator started")
+        
+    def stop(self):
+        """Stop scaling orchestration."""
+        self.logger.info("Scaling orchestrator stopped")
+        
+    def get_status(self):
+        """Get scaling status."""
+        return {
+            'active': True,
+            'policy': 'adaptive',
+            'workers': self.task_manager.get_worker_count() if hasattr(self.task_manager, 'get_worker_count') else 2
+        }

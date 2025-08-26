@@ -31,7 +31,7 @@ class PerformanceTracker:
         """Stop tracking."""
         pass
 
-class HealthChecker:
+class SimpleHealthChecker:
     """Simple health checking."""
     
     def __init__(self):
@@ -47,7 +47,7 @@ class ComprehensiveMonitor:
     def __init__(self):
         self.alert_manager = AlertManager()
         self.performance_tracker = PerformanceTracker()
-        self.health_checker = HealthChecker()
+        self.health_checker = SimpleHealthChecker()
         
     def get_system_status(self):
         """Get comprehensive system status."""
@@ -181,43 +181,60 @@ class ResourceMonitor:
     
     def _collect_metrics(self) -> PerformanceMetrics:
         """Collect current system metrics with fallback for missing psutil."""
-        try:
-            import psutil
-            cpu_percent = psutil.cpu_percent()
-            memory = psutil.virtual_memory()
-            disk = psutil.disk_usage('/')
-            
-            metrics = PerformanceMetrics(
-                timestamp=time.time(),
-                cpu_percent=cpu_percent,
-                memory_percent=memory.percent,
-                memory_available_gb=memory.available / (1024**3),
-                disk_usage_percent=disk.percent,
-                active_processes=len(psutil.pids())
-            )
-        except ImportError:
-            # Fallback metrics when psutil is not available
-            metrics = PerformanceMetrics(
-                timestamp=time.time(),
-                cpu_percent=0.0,  # Unknown
-                memory_percent=0.0,  # Unknown
-                memory_available_gb=0.0,  # Unknown
-                disk_usage_percent=0.0,  # Unknown
-                active_processes=0
-            )
+        from .runtime_dependency_manager import optional_import
         
-        # Try to get GPU metrics
-        try:
-            import torch
-            if torch.cuda.is_available():
-                device = torch.cuda.current_device()
-                gpu_memory = torch.cuda.memory_stats(device)
-                total_memory = torch.cuda.get_device_properties(device).total_memory
+        psutil = optional_import("psutil")
+        
+        if psutil is not None:
+            try:
+                cpu_percent = psutil.cpu_percent()
+                memory = psutil.virtual_memory()
+                disk = psutil.disk_usage('/')
                 
-                metrics.gpu_memory_used = gpu_memory.get('allocated_bytes.all.current', 0) / total_memory * 100
-                metrics.gpu_utilization = torch.cuda.utilization()
-        except ImportError:
-            pass
+                metrics = PerformanceMetrics(
+                    timestamp=time.time(),
+                    cpu_percent=cpu_percent,
+                    memory_percent=memory.percent,
+                    memory_available_gb=memory.available / (1024**3),
+                    disk_usage_percent=disk.percent,
+                    active_processes=len(psutil.pids())
+                )
+            except Exception as e:
+                self.logger.warning(f"Error collecting psutil metrics: {e}")
+                metrics = self._get_fallback_metrics()
+        else:
+            metrics = self._get_fallback_metrics()
+            
+        return self._add_gpu_metrics(metrics)
+    
+    def _get_fallback_metrics(self) -> PerformanceMetrics:
+        """Get fallback metrics when psutil is not available."""
+        return PerformanceMetrics(
+            timestamp=time.time(),
+            cpu_percent=0.0,  # Unknown
+            memory_percent=0.0,  # Unknown
+            memory_available_gb=0.0,  # Unknown
+            disk_usage_percent=0.0,  # Unknown
+            active_processes=0
+        )
+    
+    def _add_gpu_metrics(self, metrics: PerformanceMetrics) -> PerformanceMetrics:
+        """Add GPU metrics to performance metrics."""
+        from .runtime_dependency_manager import optional_import
+        
+        torch = optional_import("torch")
+        
+        if torch is not None:
+            try:
+                if torch.cuda.is_available():
+                    device = torch.cuda.current_device()
+                    gpu_memory = torch.cuda.memory_stats(device)
+                    total_memory = torch.cuda.get_device_properties(device).total_memory
+                    
+                    metrics.gpu_memory_used = gpu_memory.get('allocated_bytes.all.current', 0) / total_memory * 100
+                    metrics.gpu_utilization = torch.cuda.utilization()
+            except Exception as e:
+                self.logger.debug(f"Error collecting GPU metrics: {e}")
         
         return metrics
     

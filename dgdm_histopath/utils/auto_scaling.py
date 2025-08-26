@@ -185,13 +185,16 @@ class AutoScaler:
 
     def _collect_metrics(self) -> Optional[ScalingMetrics]:
         """Collect current system metrics."""
-        if not PSUTIL_AVAILABLE:
-            return None
-        
         try:
-            # System metrics
-            cpu_percent = psutil.cpu_percent(interval=1.0)
-            memory = psutil.virtual_memory()
+            if PSUTIL_AVAILABLE:
+                # System metrics with psutil
+                cpu_percent = psutil.cpu_percent(interval=1.0)
+                memory = psutil.virtual_memory()
+                memory_percent = memory.percent
+            else:
+                # Fallback metrics when psutil unavailable
+                cpu_percent = 0.0  # Unknown
+                memory_percent = 0.0  # Unknown
             
             # Placeholder for application-specific metrics
             # In a real implementation, these would come from the actual system
@@ -203,7 +206,7 @@ class AutoScaler:
             return ScalingMetrics(
                 timestamp=datetime.now(),
                 cpu_usage_percent=cpu_percent,
-                memory_usage_percent=memory.percent,
+                memory_usage_percent=memory_percent,
                 queue_size=queue_size,
                 active_workers=active_workers,
                 avg_response_time_ms=avg_response_time,

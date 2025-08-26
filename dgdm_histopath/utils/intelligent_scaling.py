@@ -83,7 +83,7 @@ class IntelligentCache:
             self.access_counts[key] = self.access_counts.get(key, 0) + 1
             self.cache_size_bytes += self._get_size(value)
             
-    def get(self, key: str) -> Any:
+    def get(self, key: str, default: Any = None) -> Any:
         """Get a value from the cache."""
         with self.lock:
             if key in self.cache:
@@ -93,7 +93,7 @@ class IntelligentCache:
                 return self.cache[key]
             else:
                 self.miss_count += 1
-                return None
+                return default
                 
     def _get_size(self, obj: Any) -> int:
         """Estimate object size in bytes."""
@@ -153,8 +153,8 @@ class IntelligentCache:
             del self.access_times[key]
             self.access_counts.pop(key, 0)
     
-    def get(self, func_name: str, args: Tuple, kwargs: Dict) -> Tuple[bool, Any]:
-        """Get item from cache."""
+    def get_cached_result(self, func_name: str, args: Tuple, kwargs: Dict) -> Tuple[bool, Any]:
+        """Get item from cache for function caching."""
         with self.lock:
             key = self._get_cache_key(func_name, args, kwargs)
             
@@ -403,7 +403,7 @@ class ScalableProcessor:
             @wraps(func)
             def wrapper(*args, **kwargs):
                 # Check cache first
-                hit, result = self.cache.get(func.__name__, args, kwargs)
+                hit, result = self.cache.get_cached_result(func.__name__, args, kwargs)
                 if hit:
                     self.logger.debug(f"Cache hit for {func.__name__}")
                     return result

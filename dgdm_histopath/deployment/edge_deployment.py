@@ -18,21 +18,42 @@ from typing import Dict, List, Optional, Any, Union, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.quantization as quant
-from torch.utils.mobile_optimizer import optimize_for_mobile
 import tempfile
-import psutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+    logging.warning("NumPy not available")
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.quantization as quant
+    from torch.utils.mobile_optimizer import optimize_for_mobile
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    logging.warning("PyTorch not available")
+
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logging.warning("psutil not available")
+
+try:
     # Mobile deployment
-    import torch.jit
-    import torchvision
-    TORCH_MOBILE_AVAILABLE = True
+    if TORCH_AVAILABLE:
+        import torch.jit
+        import torchvision
+        TORCH_MOBILE_AVAILABLE = True
+    else:
+        TORCH_MOBILE_AVAILABLE = False
 except ImportError:
     TORCH_MOBILE_AVAILABLE = False
     logging.warning("Torch mobile not available")
